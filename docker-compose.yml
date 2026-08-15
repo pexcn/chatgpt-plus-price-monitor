@@ -1,0 +1,15 @@
+services:
+  chatgpt-plus-price-monitor:
+    image: ghcr.io/pexcn/chatgpt-plus-price-monitor:latest
+    container_name: chatgpt-plus-price-monitor
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      TELEGRAM_BOT_TOKEN: xxxxxxxxxx:xxxxxxxxx-xxxxxx-xx-xxxxxxxxxxxxxxx
+      TELEGRAM_CHAT_ID: xxxxxxxx
+    command: >-
+      --threshold 8
+      --interval 3m:30s
+      --sample 30
+      --floor-ratio 0.1
+      --top 5
