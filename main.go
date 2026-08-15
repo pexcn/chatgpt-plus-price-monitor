@@ -24,7 +24,6 @@ type config struct {
 	threshold float64
 	interval  time.Duration
 
-	minPrice   float64
 	sample     int
 	floorRatio float64
 	top        int
@@ -100,7 +99,6 @@ func main() {
 var options = []struct{ short, long string }{
 	{"t", "threshold"},
 	{"i", "interval"},
-	{"m", "min-price"},
 	{"s", "sample"},
 	{"", "floor-ratio"},
 	{"n", "top"},
@@ -116,7 +114,6 @@ func newFlagSet(cfg *config, errorHandling flag.ErrorHandling) *flag.FlagSet {
 
 	fs.Float64Var(&cfg.threshold, "threshold", 10, "最便宜的可信报价低于该价格（元）时通知")
 	fs.DurationVar(&cfg.interval, "interval", 30*time.Minute, "轮询间隔，0 表示只检查一次就退出")
-	fs.Float64Var(&cfg.minPrice, "min-price", 0, "排除低于该价格（元）的报价，用于过滤掉非 Plus 商品，0 表示不限制")
 	fs.IntVar(&cfg.sample, "sample", 30, "取多少条报价作为参考价位的样本")
 	fs.Float64Var(&cfg.floorRatio, "floor-ratio", 0.5, "低于 参考价位×该比例 的报价视为异常规格剔除")
 	fs.IntVar(&cfg.top, "top", 5, "通知里列出最便宜的 N 条")
@@ -129,7 +126,6 @@ func newFlagSet(cfg *config, errorHandling flag.ErrorHandling) *flag.FlagSet {
 	// 短选项和长选项共用同一个变量，这是 flag 包里做别名的常规写法。
 	fs.Float64Var(&cfg.threshold, "t", 10, "")
 	fs.DurationVar(&cfg.interval, "i", 30*time.Minute, "")
-	fs.Float64Var(&cfg.minPrice, "m", 0, "")
 	fs.IntVar(&cfg.sample, "s", 30, "")
 	fs.IntVar(&cfg.top, "n", 5, "")
 	fs.BoolVar(&cfg.verbose, "v", false, "")
@@ -212,10 +208,6 @@ func (c *config) validate() error {
 		return fmt.Errorf("--threshold 必须大于 0")
 	case c.interval < 0:
 		return fmt.Errorf("--interval 不能为负数")
-	case c.minPrice < 0:
-		return fmt.Errorf("--min-price 不能为负数")
-	case c.minPrice > 0 && c.minPrice > c.threshold:
-		return fmt.Errorf("--min-price (%.2f) 高于 --threshold (%.2f)，永远不会触发通知", c.minPrice, c.threshold)
 	case c.sample <= 0:
 		return fmt.Errorf("--sample 必须大于 0")
 	case c.floorRatio <= 0 || c.floorRatio > 1:
@@ -239,11 +231,10 @@ func check(ctx context.Context, fetch fetcher, notify notifier, cfg *config, pre
 	}
 
 	// 用中位数当参照系剔除掉明显不是同一档商品的报价，再看最便宜的那条。
-	a := priceai.Analyze(offers, cfg.minPrice, cfg.floorRatio)
+	a := priceai.Analyze(offers, cfg.floorRatio)
 	best, ok := a.Best()
 	if !ok {
-		return prev, fmt.Errorf("%d 条报价全被排除（低于 --min-price %.2f 的 %d 条，低于地板线 %.2f 的 %d 条）",
-			len(offers), cfg.minPrice, len(a.BelowMin), a.Floor, len(a.Dropped))
+		return prev, fmt.Errorf("%d 条报价全低于地板线 %.2f", len(offers), a.Floor)
 	}
 	below := best.Price <= cfg.threshold
 	logResult(cfg, a, best, below)
@@ -304,8 +295,8 @@ func logResult(cfg *config, a priceai.Analysis, best priceai.Offer, below bool) 
 	if below {
 		reached = "已达成"
 	}
-	log.Printf("最便宜的可信报价 %.2f 元（参考价位 %.2f，地板线 %.2f；排除 %d 条低价档、剔除 %d 条异常），阈值 %.2f -> %s",
-		best.Price, a.Median, a.Floor, len(a.BelowMin), len(a.Dropped), cfg.threshold, reached)
+	log.Printf("最便宜的可信报价 %.2f 元（参考价位 %.2f，地板线 %.2f；剔除 %d 条异常），阈值 %.2f -> %s",
+		best.Price, a.Median, a.Floor, len(a.Dropped), cfg.threshold, reached)
 	if !cfg.verbose {
 		return
 	}
@@ -317,9 +308,6 @@ func logResult(cfg *config, a priceai.Analysis, best priceai.Offer, below bool) 
 	}
 	for _, o := range a.Dropped {
 		log.Printf("  [剔除] %.2f 元 | %s | %s", o.Price, o.Store(), o.SourceTitle)
-	}
-	for _, o := range a.BelowMin {
-		log.Printf("  [低价档] %.2f 元 | %s | %s", o.Price, o.Store(), o.SourceTitle)
 	}
 }
 
@@ -338,9 +326,6 @@ func buildMessage(action state.Action, cfg *config, a priceai.Analysis, best pri
 	fmt.Fprintf(&b, "参考价位 %.2f 元", a.Median)
 	if n := len(a.Dropped); n > 0 {
 		fmt.Fprintf(&b, "，已剔除 %d 条低于 %.2f 元的异常报价", n, a.Floor)
-	}
-	if n := len(a.BelowMin); n > 0 {
-		fmt.Fprintf(&b, "，已排除 %d 条低价档报价", n)
 	}
 	b.WriteString("\n")
 	if action == state.AlertRebound && prevBest > 0 {

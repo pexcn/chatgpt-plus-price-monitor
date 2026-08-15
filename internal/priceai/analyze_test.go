@@ -70,7 +70,7 @@ func TestAnalyzeDecision(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a := Analyze(priced(tt.prices...), 0, floorRatio)
+			a := Analyze(priced(tt.prices...), floorRatio)
 			best, ok := a.Best()
 			if !ok {
 				t.Fatal("Best() 不应为空")
@@ -90,7 +90,7 @@ func TestAnalyzeDecision(t *testing.T) {
 
 func TestAnalyzeSortsAndPartitions(t *testing.T) {
 	// 乱序输入也要正确排序。
-	a := Analyze(priced(12, 2, 11.5, 11, 11), 0, 0.5)
+	a := Analyze(priced(12, 2, 11.5, 11, 11), 0.5)
 	if a.Median != 11 {
 		t.Errorf("Median = %v, 期望 11", a.Median)
 	}
@@ -112,19 +112,19 @@ func TestAnalyzeSortsAndPartitions(t *testing.T) {
 }
 
 func TestMedian(t *testing.T) {
-	if got := Analyze(priced(1, 2, 3), 0, 0).Median; got != 2 {
+	if got := Analyze(priced(1, 2, 3), 0).Median; got != 2 {
 		t.Errorf("奇数个: Median = %v, 期望 2", got)
 	}
-	if got := Analyze(priced(1, 2, 3, 4), 0, 0).Median; got != 2.5 {
+	if got := Analyze(priced(1, 2, 3, 4), 0).Median; got != 2.5 {
 		t.Errorf("偶数个: Median = %v, 期望 2.5", got)
 	}
-	if got := Analyze(nil, 0, 0.5).Median; got != 0 {
+	if got := Analyze(nil, 0.5).Median; got != 0 {
 		t.Errorf("空输入: Median = %v, 期望 0", got)
 	}
 }
 
 func TestAnalyzeEmpty(t *testing.T) {
-	a := Analyze(nil, 0, 0.5)
+	a := Analyze(nil, 0.5)
 	if _, ok := a.Best(); ok {
 		t.Error("空输入时 Best() 应返回 false")
 	}
@@ -132,7 +132,7 @@ func TestAnalyzeEmpty(t *testing.T) {
 
 // floorRatio 为 1 时只保留不低于中位数的报价。
 func TestAnalyzeFloorRatioOne(t *testing.T) {
-	a := Analyze(priced(9, 11, 11.5, 12, 11), 0, 1)
+	a := Analyze(priced(9, 11, 11.5, 12, 11), 1)
 	if a.Floor != 11 {
 		t.Errorf("Floor = %v, 期望 11", a.Floor)
 	}
@@ -148,7 +148,7 @@ func TestAnalyzeRealResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse 失败: %v", err)
 	}
-	a := Analyze(offers, 0, 0.5)
+	a := Analyze(offers, 0.5)
 	if len(a.Dropped) != 0 {
 		t.Errorf("正常月卡不该被剔除，实际剔除了 %d 条（中位数 %.2f，地板线 %.2f）",
 			len(a.Dropped), a.Median, a.Floor)
@@ -160,7 +160,6 @@ func TestAnalyzeRealResponse(t *testing.T) {
 }
 
 // 真实的最便宜一页：30 条全是"未接码日抛号"（质保半小时），18.69~27.04 元。
-// 月卡在 100 元以上，两档商品只能靠价格区分——标题和 filterTags 商家都能改。
 func TestAnalyzeCheapestPageIsAllDayPasses(t *testing.T) {
 	b, err := os.ReadFile("testdata/offers_cheapest.json")
 	if err != nil {
@@ -171,47 +170,13 @@ func TestAnalyzeCheapestPageIsAllDayPasses(t *testing.T) {
 		t.Fatalf("parse 失败: %v", err)
 	}
 
-	// 不设下限时，这一整档日抛号都会参与判断，最低 18.69 元。
-	a := Analyze(offers, 0, 0.5)
+	// 这一整档日抛号价格集中，都会参与判断，最低可信报价是 18.69 元。
+	a := Analyze(offers, 0.5)
 	if len(a.Dropped) != 0 {
 		t.Errorf("这页价格很集中，不该有报价被地板线剔除，实际剔除 %d 条", len(a.Dropped))
 	}
 	best, _ := a.Best()
 	if best.Price != 18.69 {
 		t.Errorf("Best = %v, 期望 18.69", best.Price)
-	}
-
-	// 加上下限之后整档被排除，不会误报成"月卡降价了"。
-	a = Analyze(offers, 60, 0.5)
-	if len(a.BelowMin) != 30 {
-		t.Errorf("下限 60 元应排除全部 30 条日抛，实际排除 %d 条", len(a.BelowMin))
-	}
-	if _, ok := a.Best(); ok {
-		t.Error("全部被排除后 Best() 应返回 false")
-	}
-}
-
-// 先按 minPrice 排除另一档商品，中位数才落在关心的价位上。
-func TestAnalyzeMinPriceAppliedBeforeMedian(t *testing.T) {
-	// 20 上下是日抛，100 上下是月卡。
-	offers := priced(19, 20, 21, 22, 100, 104, 108, 112)
-
-	// 不设下限：中位数被日抛拉到 61，地板线 30.5，反而把月卡全留下、日抛全剔除。
-	a := Analyze(offers, 0, 0.5)
-	if a.Median != 61 {
-		t.Errorf("不设下限时 Median = %v, 期望 61", a.Median)
-	}
-
-	// 设了下限：中位数落在月卡这一档，最低可信报价是 100。
-	a = Analyze(offers, 60, 0.5)
-	if a.Median != 106 {
-		t.Errorf("设下限后 Median = %v, 期望 106", a.Median)
-	}
-	if len(a.BelowMin) != 4 {
-		t.Errorf("应排除 4 条日抛，实际 %d 条", len(a.BelowMin))
-	}
-	best, _ := a.Best()
-	if best.Price != 100 {
-		t.Errorf("Best = %v, 期望 100", best.Price)
 	}
 }
