@@ -3,13 +3,7 @@
 监控 [priceai.cc](https://priceai.cc/products/chatgpt-plus) 上 ChatGPT Plus 的报价，
 当**最便宜的可信报价**低于阈值时通过 Telegram 通知。
 
-零第三方依赖，只用 Go 标准库。
-
 ## 用法
-
-```sh
-go build -o chatgpt-plus-price-monitor .
-```
 
 先看看现在什么价。**不设环境变量时只打印日志，不发通知**：
 
@@ -27,18 +21,11 @@ go build -o chatgpt-plus-price-monitor .
 
 用它确认 `--threshold` 定在合理位置，再配通知：
 
-1. 找 [@BotFather](https://t.me/BotFather) 发 `/newbot`，拿到形如 `123456:ABC-DEF...` 的 token；
-2. 给你的 bot 发一条消息，然后访问
-   `https://api.telegram.org/bot<TOKEN>/getUpdates`，从返回里找到 `chat.id`；
-3. 两个都设置好，就会开始发通知：
-
 ```sh
 export TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
 export TELEGRAM_CHAT_ID=123456789
 ./chatgpt-plus-price-monitor -i 30m -n 5 -t 10
 ```
-
-凭据只从环境变量读，没做成命令行选项：写在命令行上同机器的其他人 `ps` 就能看到。
 
 ## 选项
 
@@ -55,26 +42,9 @@ export TELEGRAM_CHAT_ID=123456789
 | `--timeout` | `30s` | 单次 HTTP 请求超时 |
 | `-v, --verbose` | | 打印每条报价的店铺和标题 |
 
-## 数据来源
-
-直接调页面背后的接口，不解析 HTML：
-
-```
-GET https://priceai.cc/api/products/chatgpt-plus/offers?limit=<top>&offset=0
-```
-
-这个接口**默认按价格升序返回**，所以 `offset=0&limit=N` 拿到的就是最便宜的 N 条，
-也正是页面上显示的前 N 条，本地不需要再排序。
-
-用到的字段是 `price`、`currency`、`sourceStoreName`、`sourceTitle`、`url`。
-通知里会把价格做成可点的链接，收到就能直接跳去下单。
-
-接口返回条数少于 `--sample`、或币种不是 CNY 时直接报错退出（exit code 1）。
-不完整或不可比的样本很可能凑巧低于阈值而误报，宁可报错。
-
 ## 怎么判断"真便宜"
 
-卖家常把日抛、加购项、拼车之类的东西挂在同一个商品下，价格只有正常月卡的零头。
+卖家有时候把加购项、拼车之类的东西挂在同一个商品下，价格只有正常价格的零头。
 直接看均价或最低价都会被这些报价带偏：
 
 | 前 5 个报价 | 均价 | 均价规则 | 期望 |
@@ -94,7 +64,7 @@ GET https://priceai.cc/api/products/chatgpt-plus/offers?limit=<top>&offset=0
 剔除 2 之后仍然发现 9 这个真实低价。
 
 `--sample` 要比 `--top` 大不少（默认 30）。如果只看最便宜的 5 条，而这 5 条恰好
-全是日抛，中位数本身就是错的，什么也剔除不掉。样本大一些才能覆盖到真实价位。
+全是加购项，中位数本身就是错的，什么也剔除不掉。样本大一些才能覆盖到真实价位。
 
 `--floor-ratio` 则用于同一档商品内部的异常值，调小更宽松，调大更严格。
 
@@ -114,4 +84,3 @@ GET https://priceai.cc/api/products/chatgpt-plus/offers?limit=<top>&offset=0
 
 去重状态只存在内存里，所以要常驻运行才有意义。重启会重新武装：
 如果重启时价格仍低于阈值，会再收到一条降价提醒。
-`--once` 每次都是全新状态，适合手动看一眼当前价格，不适合挂 cron。
