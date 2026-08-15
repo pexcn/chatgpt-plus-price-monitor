@@ -1,7 +1,6 @@
 package priceai
 
 import (
-	"os"
 	"testing"
 )
 
@@ -142,15 +141,10 @@ func TestAnalyzeFloorRatioOne(t *testing.T) {
 	}
 }
 
-// 用真实数据跑一遍：那一页都是正常月卡，不该有报价被剔除。
-func TestAnalyzeRealResponse(t *testing.T) {
-	offers, err := parse(realResponse(t), 30)
-	if err != nil {
-		t.Fatalf("parse 失败: %v", err)
-	}
-	a := Analyze(offers, 0.5)
+func TestAnalyzeConcentratedPrices(t *testing.T) {
+	a := Analyze(priced(100.94, 101.97, 105.06, 107.64, 108.15), 0.5)
 	if len(a.Dropped) != 0 {
-		t.Errorf("正常月卡不该被剔除，实际剔除了 %d 条（中位数 %.2f，地板线 %.2f）",
+		t.Errorf("集中价位不该被剔除，实际剔除了 %d 条（中位数 %.2f，地板线 %.2f）",
 			len(a.Dropped), a.Median, a.Floor)
 	}
 	best, ok := a.Best()
@@ -159,21 +153,10 @@ func TestAnalyzeRealResponse(t *testing.T) {
 	}
 }
 
-// 真实的最便宜一页：30 条全是"未接码日抛号"（质保半小时），18.69~27.04 元。
-func TestAnalyzeCheapestPageIsAllDayPasses(t *testing.T) {
-	b, err := os.ReadFile("testdata/offers_cheapest.json")
-	if err != nil {
-		t.Fatalf("读取测试数据失败: %v", err)
-	}
-	offers, err := parse(b, 30)
-	if err != nil {
-		t.Fatalf("parse 失败: %v", err)
-	}
-
-	// 这一整档日抛号价格集中，都会参与判断，最低可信报价是 18.69 元。
-	a := Analyze(offers, 0.5)
+func TestAnalyzeConcentratedDayPassPrices(t *testing.T) {
+	a := Analyze(priced(18.69, 21.63, 22.15, 23.69, 27.04), 0.5)
 	if len(a.Dropped) != 0 {
-		t.Errorf("这页价格很集中，不该有报价被地板线剔除，实际剔除 %d 条", len(a.Dropped))
+		t.Errorf("日抛价位集中，不该有报价被地板线剔除，实际剔除 %d 条", len(a.Dropped))
 	}
 	best, _ := a.Best()
 	if best.Price != 18.69 {

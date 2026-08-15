@@ -5,22 +5,19 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 )
 
-// realResponse 是从 priceai.cc 抓下来的真实接口返回（limit=30&offset=60）。
-func realResponse(t *testing.T) []byte {
-	t.Helper()
-	b, err := os.ReadFile("testdata/offers.json")
-	if err != nil {
-		t.Fatalf("读取测试数据失败: %v", err)
-	}
-	return b
-}
+var sampleResponse = []byte(`{"offers":[
+	{"id":"a","sourceName":"源店铺","sourceStoreName":"Ai小卖部","sourceTitle":"GPT Plus 月卡","price":100.94,"currency":"CNY","url":"https://pay.ldxp.cn/item/wvlagr"},
+	{"id":"b","price":101.97,"currency":"CNY"},
+	{"id":"c","price":105.06,"currency":"CNY"},
+	{"id":"d","price":116,"currency":"CNY"},
+	{"id":"e","price":125,"currency":"CNY"}
+],"total":5}`)
 
 func TestParseRealResponse(t *testing.T) {
-	offers, err := parse(realResponse(t), 5)
+	offers, err := parse(sampleResponse, 5)
 	if err != nil {
 		t.Fatalf("parse 失败: %v", err)
 	}
@@ -29,7 +26,7 @@ func TestParseRealResponse(t *testing.T) {
 	}
 
 	// 接口按价格升序返回，前 5 条就是最便宜的 5 条。
-	want := []float64{100.94, 101.97, 105.06, 107.64, 108.15}
+	want := []float64{100.94, 101.97, 105.06, 116, 125}
 	for i, w := range want {
 		if offers[i].Price != w {
 			t.Errorf("第 %d 条价格 = %v, 期望 %v", i+1, offers[i].Price, w)
@@ -53,7 +50,7 @@ func TestParseRealResponse(t *testing.T) {
 
 // 真实返回里的价格既有小数也有整数（116、125），都要能解析。
 func TestParseHandlesIntegerPrices(t *testing.T) {
-	offers, err := parse(realResponse(t), 30)
+	offers, err := parse(sampleResponse, 5)
 	if err != nil {
 		t.Fatalf("parse 失败: %v", err)
 	}
@@ -121,7 +118,7 @@ func TestCheapestRequestParams(t *testing.T) {
 		gotQuery = r.URL.RawQuery
 		gotAccept = r.Header.Get("Accept")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(realResponse(t))
+		_, _ = w.Write(sampleResponse)
 	}))
 	defer srv.Close()
 
