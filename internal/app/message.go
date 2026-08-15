@@ -21,8 +21,8 @@ func buildMessage(action state.Action, cfg *config, a priceai.Analysis, best pri
 		b.WriteString("🔺 <b>ChatGPT Plus 价格回升</b>\n\n")
 	}
 
-	fmt.Fprintf(&b, "最低可信报价：<b>%.2f</b> 元（阈值 %.2f）\n", best.Price, cfg.threshold)
-	fmt.Fprintf(&b, "参考价位 %.2f 元", a.Median)
+	fmt.Fprintf(&b, "最低可信报价：<b>%.2f</b> 元（阈值 %.2f 元）\n", best.Price, cfg.threshold)
+	fmt.Fprintf(&b, "参考价位：<b>%.2f</b> 元", a.Median)
 	if n := len(a.Dropped); cfg.floorRatioSet && n > 0 {
 		fmt.Fprintf(&b, "，已剔除 %d 条低于 %.2f 元的异常报价", n, a.Floor)
 	}
@@ -38,9 +38,9 @@ func buildMessage(action state.Action, cfg *config, a priceai.Analysis, best pri
 		}
 		store := telegram.Escape(o.Store())
 		if o.URL != "" {
-			fmt.Fprintf(&b, "%d. <a href=\"%s\"><b>%.2f</b> 元 · %s</a>\n", i+1, html.EscapeString(o.URL), o.Price, store)
+			fmt.Fprintf(&b, "%d. <a href=\"%s\">%.2f 元 · %s</a>\n", i+1, html.EscapeString(o.URL), o.Price, store)
 		} else {
-			fmt.Fprintf(&b, "%d. <b>%.2f</b> 元 · %s\n", i+1, o.Price, store)
+			fmt.Fprintf(&b, "%d. %.2f 元 · %s\n", i+1, o.Price, store)
 		}
 		if t := o.SourceTitle; t != "" {
 			fmt.Fprintf(&b, "<i>%s</i>\n", telegram.Escape(truncate(t, 50)))
