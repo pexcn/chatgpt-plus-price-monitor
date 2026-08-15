@@ -81,9 +81,11 @@ func failingFetch(msg string) fetcher {
 
 func testConfig() *config {
 	return &config{
-		top:           5,
 		threshold:     10,
 		interval:      30 * time.Minute,
+		sample:        30,
+		floorRatio:    0.5,
+		top:           5,
 		cooldown:      24 * time.Hour,
 		failThreshold: 3,
 		timeout:       5 * time.Second,
@@ -94,7 +96,7 @@ func testConfig() *config {
 func TestCheckAlertsOnceThenStaysSilent(t *testing.T) {
 	tg := newFakeTelegram(t)
 	cfg := testConfig()
-	fetch := stubFetch(offersAt(8.8, 9.0, 9.5, 10.0, 11.2)) // 均价 9.70
+	fetch := stubFetch(offersAt(8.8, 9.0, 9.5, 10.0, 11.2)) // 中位数 9.50，最低可信 8.80
 
 	var st state.State
 	for i := 0; i < 3; i++ {
@@ -111,14 +113,14 @@ func TestCheckAlertsOnceThenStaysSilent(t *testing.T) {
 	if !strings.Contains(msgs[0], "降价提醒") {
 		t.Errorf("通知内容不对: %s", msgs[0])
 	}
-	for _, want := range []string{"9.70", "8.80", "店铺A", "11.20"} {
+	for _, want := range []string{"8.80", "9.50", "店铺A"} {
 		if !strings.Contains(msgs[0], want) {
 			t.Errorf("通知里缺少 %q:\n%s", want, msgs[0])
 		}
 	}
 }
 
-// 价格回升后应发一条回升通知，并带上上次的均价。
+// 价格回升后应发一条回升通知，并带上上次的价格。
 func TestCheckNotifiesOnRebound(t *testing.T) {
 	tg := newFakeTelegram(t)
 	cfg := testConfig()
@@ -138,7 +140,36 @@ func TestCheckNotifiesOnRebound(t *testing.T) {
 		t.Errorf("第二条应是回升通知: %s", msgs[1])
 	}
 	if !strings.Contains(msgs[1], "8.00") {
-		t.Errorf("回升通知里应带上次均价 8.00:\n%s", msgs[1])
+		t.Errorf("回升通知里应带上次报价 8.00:\n%s", msgs[1])
+	}
+}
+
+// 端到端验证异常规格的剔除：均价规则会把这两种情况都判反。
+func TestCheckIgnoresOffSpecOutlier(t *testing.T) {
+	tests := []struct {
+		name       string
+		prices     []float64
+		wantNotify bool
+	}{
+		// 均价 9.50 低于阈值，但 2 显然不是一份月卡，不该通知。
+		{"极低价是别的规格", []float64{2, 11, 11.5, 12, 11}, false},
+		// 均价 10.90 高于阈值，但 9 是真便宜，该通知。
+		{"最低价接近价位", []float64{9, 11, 11.5, 12, 11}, true},
+		// 剔除 2 之后，9 仍然值得提醒。
+		{"剔除异常值后仍有真低价", []float64{2, 9, 11, 11.5, 12}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tg := newFakeTelegram(t)
+			if _, err := check(context.Background(), stubFetch(offersAt(tt.prices...)),
+				tg.client(), testConfig(), state.State{}); err != nil {
+				t.Fatalf("check 失败: %v", err)
+			}
+			got := len(tg.messages()) == 1
+			if got != tt.wantNotify {
+				t.Errorf("是否通知 = %v, 期望 %v（价格 %v）", got, tt.wantNotify, tt.prices)
+			}
+		})
 	}
 }
 
@@ -361,13 +392,13 @@ func TestNewNotifier(t *testing.T) {
 
 // 短选项与长选项必须指向同一个变量。
 func TestShortFlags(t *testing.T) {
-	long, _ := parseFlags([]string{"--top", "8", "--threshold", "12.5", "--interval", "1h", "--verbose"})
-	short, _ := parseFlags([]string{"-n", "8", "-t", "12.5", "-i", "1h", "-v"})
+	long, _ := parseFlags([]string{"--top", "8", "--threshold", "12.5", "--interval", "1h", "--sample", "50", "--verbose"})
+	short, _ := parseFlags([]string{"-n", "8", "-t", "12.5", "-i", "1h", "-s", "50", "-v"})
 
 	if *long != *short {
 		t.Errorf("短选项结果与长选项不一致:\n长 %+v\n短 %+v", *long, *short)
 	}
-	if short.top != 8 || short.threshold != 12.5 || short.interval != time.Hour || !short.verbose {
+	if short.top != 8 || short.threshold != 12.5 || short.interval != time.Hour || short.sample != 50 || !short.verbose {
 		t.Errorf("短选项解析结果不对: %+v", short)
 	}
 }
@@ -413,10 +444,13 @@ func TestValidate(t *testing.T) {
 		t.Errorf("合法配置不应报错: %v", err)
 	}
 	bad := map[string]func(*config){
-		"top 为 0":      func(c *config) { c.top = 0 },
-		"阈值为 0":        func(c *config) { c.threshold = 0 },
-		"interval 为 0": func(c *config) { c.interval = 0 },
-		"超时为 0":        func(c *config) { c.timeout = 0 },
+		"top 为 0":          func(c *config) { c.top = 0 },
+		"阈值为 0":            func(c *config) { c.threshold = 0 },
+		"interval 为 0":     func(c *config) { c.interval = 0 },
+		"sample 为 0":       func(c *config) { c.sample = 0 },
+		"floor-ratio 为 0":  func(c *config) { c.floorRatio = 0 },
+		"floor-ratio 超过 1": func(c *config) { c.floorRatio = 1.5 },
+		"超时为 0":            func(c *config) { c.timeout = 0 },
 	}
 	for name, mutate := range bad {
 		c := testConfig()

@@ -21,10 +21,13 @@ import (
 )
 
 type config struct {
-	top       int
 	threshold float64
 	interval  time.Duration
 	once      bool
+
+	sample     int
+	floorRatio float64
+	top        int
 
 	cooldown      time.Duration
 	noRebound     bool
@@ -67,8 +70,8 @@ func main() {
 		return
 	}
 
-	log.Printf("开始监控（每 %s 检查一次，最便宜的 %d 个均价 <= %.2f 元时通知）",
-		cfg.interval, cfg.top, cfg.threshold)
+	log.Printf("开始监控（每 %s 检查一次，最便宜的可信报价 <= %.2f 元时通知）",
+		cfg.interval, cfg.threshold)
 
 	// 状态只存在内存里，所以必须常驻运行才能去重。
 	var st state.State
@@ -94,10 +97,12 @@ func main() {
 // options 决定 --help 里的顺序，按重要程度排列。
 // flag 包自带的输出是字典序的，跟使用频率对不上。
 var options = []struct{ short, long string }{
-	{"n", "top"},
 	{"t", "threshold"},
 	{"i", "interval"},
 	{"", "once"},
+	{"s", "sample"},
+	{"", "floor-ratio"},
+	{"n", "top"},
 	{"", "cooldown"},
 	{"", "no-rebound"},
 	{"", "fail-threshold"},
@@ -108,10 +113,12 @@ var options = []struct{ short, long string }{
 func newFlagSet(cfg *config, errorHandling flag.ErrorHandling) *flag.FlagSet {
 	fs := flag.NewFlagSet("chatgpt-plus-price-monitor", errorHandling)
 
-	fs.IntVar(&cfg.top, "top", 5, "取最便宜的 N 个报价计算均价")
-	fs.Float64Var(&cfg.threshold, "threshold", 10, "均价低于该价格（元）时通知")
+	fs.Float64Var(&cfg.threshold, "threshold", 10, "最便宜的可信报价低于该价格（元）时通知")
 	fs.DurationVar(&cfg.interval, "interval", 30*time.Minute, "轮询间隔")
 	fs.BoolVar(&cfg.once, "once", false, "只检查一次就退出")
+	fs.IntVar(&cfg.sample, "sample", 30, "取多少条报价作为参考价位的样本")
+	fs.Float64Var(&cfg.floorRatio, "floor-ratio", 0.5, "低于 参考价位×该比例 的报价视为异常规格剔除")
+	fs.IntVar(&cfg.top, "top", 5, "通知里列出最便宜的 N 条")
 	fs.DurationVar(&cfg.cooldown, "cooldown", 24*time.Hour, "持续低于阈值时的重复提醒间隔，0 表示只提醒一次")
 	fs.BoolVar(&cfg.noRebound, "no-rebound", false, "价格回升到阈值之上时不通知")
 	fs.IntVar(&cfg.failThreshold, "fail-threshold", 3, "连续抓取失败 N 次后告警，0 表示关闭")
@@ -119,9 +126,10 @@ func newFlagSet(cfg *config, errorHandling flag.ErrorHandling) *flag.FlagSet {
 	fs.BoolVar(&cfg.verbose, "verbose", false, "打印每条报价的店铺和标题")
 
 	// 短选项和长选项共用同一个变量，这是 flag 包里做别名的常规写法。
-	fs.IntVar(&cfg.top, "n", 5, "")
 	fs.Float64Var(&cfg.threshold, "t", 10, "")
 	fs.DurationVar(&cfg.interval, "i", 30*time.Minute, "")
+	fs.IntVar(&cfg.sample, "s", 30, "")
+	fs.IntVar(&cfg.top, "n", 5, "")
 	fs.BoolVar(&cfg.verbose, "v", false, "")
 
 	fs.Usage = func() { usage(fs) }
@@ -197,12 +205,16 @@ func printOptions(out io.Writer, fs *flag.FlagSet) {
 
 func (c *config) validate() error {
 	switch {
-	case c.top <= 0:
-		return fmt.Errorf("--top 必须大于 0")
 	case c.threshold <= 0:
 		return fmt.Errorf("--threshold 必须大于 0")
 	case c.interval <= 0:
 		return fmt.Errorf("--interval 必须大于 0")
+	case c.sample <= 0:
+		return fmt.Errorf("--sample 必须大于 0")
+	case c.floorRatio <= 0 || c.floorRatio > 1:
+		return fmt.Errorf("--floor-ratio 必须在 0 和 1 之间")
+	case c.top <= 0:
+		return fmt.Errorf("--top 必须大于 0")
 	case c.timeout <= 0:
 		return fmt.Errorf("--timeout 必须大于 0")
 	}
@@ -214,14 +226,19 @@ type fetcher func(ctx context.Context, n int) ([]priceai.Offer, error)
 
 // check 跑一轮检查，返回更新后的状态。
 func check(ctx context.Context, fetch fetcher, notify notifier, cfg *config, prev state.State) (state.State, error) {
-	offers, err := fetch(ctx, cfg.top)
+	offers, err := fetch(ctx, cfg.sample)
 	if err != nil {
 		return reportFailure(ctx, notify, cfg, prev, err)
 	}
 
-	st := priceai.Summarize(offers)
-	below := st.Avg <= cfg.threshold
-	logResult(cfg, offers, st, below)
+	// 用中位数当参照系剔除掉明显不是同一档商品的报价，再看最便宜的那条。
+	a := priceai.Analyze(offers, cfg.floorRatio)
+	best, ok := a.Best()
+	if !ok {
+		return prev, fmt.Errorf("%d 条报价全部低于地板线 %.2f，参考价位可能不可信", len(offers), a.Floor)
+	}
+	below := best.Price <= cfg.threshold
+	logResult(cfg, a, best, below)
 
 	next := prev
 	next.Below = below
@@ -240,11 +257,11 @@ func check(ctx context.Context, fetch fetcher, notify notifier, cfg *config, pre
 	if action == state.Silent {
 		return next, nil
 	}
-	if !send(ctx, notify, buildMessage(action, cfg, offers, st, prev.LastAvg), action.String()) {
+	if !send(ctx, notify, buildMessage(action, cfg, a, best, prev.LastAvg), action.String()) {
 		return next, nil
 	}
 	next.LastNotify = now
-	next.LastAvg = st.Avg
+	next.LastAvg = best.Price
 	return next, nil
 }
 
@@ -274,21 +291,28 @@ func send(ctx context.Context, notify notifier, msg, kind string) bool {
 	return true
 }
 
-func logResult(cfg *config, offers []priceai.Offer, st priceai.Stats, below bool) {
+func logResult(cfg *config, a priceai.Analysis, best priceai.Offer, below bool) {
 	reached := "未达成"
 	if below {
 		reached = "已达成"
 	}
-	log.Printf("最便宜的 %d 个均价 %.2f 元（最低 %.2f / 最高 %.2f），阈值 %.2f -> %s",
-		cfg.top, st.Avg, st.Min, st.Max, cfg.threshold, reached)
-	if cfg.verbose {
-		for i, o := range offers {
-			log.Printf("  %d. %.2f 元 | %s | %s", i+1, o.Price, o.Store(), o.SourceTitle)
+	log.Printf("最便宜的可信报价 %.2f 元（参考价位 %.2f，地板线 %.2f，剔除 %d 条），阈值 %.2f -> %s",
+		best.Price, a.Median, a.Floor, len(a.Dropped), cfg.threshold, reached)
+	if !cfg.verbose {
+		return
+	}
+	for i, o := range a.Kept {
+		if i >= cfg.top {
+			break
 		}
+		log.Printf("  %d. %.2f 元 | %s | %s", i+1, o.Price, o.Store(), o.SourceTitle)
+	}
+	for _, o := range a.Dropped {
+		log.Printf("  [剔除] %.2f 元 | %s | %s", o.Price, o.Store(), o.SourceTitle)
 	}
 }
 
-func buildMessage(action state.Action, cfg *config, offers []priceai.Offer, st priceai.Stats, prevAvg float64) string {
+func buildMessage(action state.Action, cfg *config, a priceai.Analysis, best priceai.Offer, prevBest float64) string {
 	var b strings.Builder
 	switch action {
 	case state.AlertBelow:
@@ -299,14 +323,21 @@ func buildMessage(action state.Action, cfg *config, offers []priceai.Offer, st p
 		b.WriteString("🔺 <b>ChatGPT Plus 价格回升</b>\n\n")
 	}
 
-	fmt.Fprintf(&b, "最便宜的 %d 个均价：<b>%.2f</b> 元（阈值 %.2f）\n", cfg.top, st.Avg, cfg.threshold)
-	fmt.Fprintf(&b, "最低 %.2f / 最高 %.2f\n", st.Min, st.Max)
-	if action == state.AlertRebound && prevAvg > 0 {
-		fmt.Fprintf(&b, "上次通知时为 %.2f 元\n", prevAvg)
+	fmt.Fprintf(&b, "最低可信报价：<b>%.2f</b> 元（阈值 %.2f）\n", best.Price, cfg.threshold)
+	fmt.Fprintf(&b, "参考价位 %.2f 元", a.Median)
+	if n := len(a.Dropped); n > 0 {
+		fmt.Fprintf(&b, "，已剔除 %d 条低于 %.2f 元的异常报价", n, a.Floor)
+	}
+	b.WriteString("\n")
+	if action == state.AlertRebound && prevBest > 0 {
+		fmt.Fprintf(&b, "上次通知时为 %.2f 元\n", prevBest)
 	}
 
 	b.WriteString("\n")
-	for i, o := range offers {
+	for i, o := range a.Kept {
+		if i >= cfg.top {
+			break
+		}
 		// 价格做成可点的链接，收到通知就能直接跳去下单。
 		fmt.Fprintf(&b, "%d. <a href=\"%s\">%.2f 元</a> · %s\n",
 			i+1, telegram.Escape(o.URL), o.Price, telegram.Escape(o.Store()))

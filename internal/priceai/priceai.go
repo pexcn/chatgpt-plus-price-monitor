@@ -107,30 +107,3 @@ func parse(body []byte, n int) ([]Offer, error) {
 	}
 	return offers, nil
 }
-
-// Stats 汇总一组报价的价格。
-type Stats struct {
-	Avg float64
-	Min float64
-	Max float64
-}
-
-// Summarize 计算均价与极值。传入空切片返回零值。
-func Summarize(offers []Offer) Stats {
-	if len(offers) == 0 {
-		return Stats{}
-	}
-	s := Stats{Min: offers[0].Price, Max: offers[0].Price}
-	var sum float64
-	for _, o := range offers {
-		sum += o.Price
-		if o.Price < s.Min {
-			s.Min = o.Price
-		}
-		if o.Price > s.Max {
-			s.Max = o.Price
-		}
-	}
-	s.Avg = sum / float64(len(offers))
-	return s
-}

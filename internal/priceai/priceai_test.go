@@ -71,27 +71,6 @@ func TestParseHandlesIntegerPrices(t *testing.T) {
 	}
 }
 
-func TestSummarizeRealResponse(t *testing.T) {
-	offers, err := parse(realResponse(t), 5)
-	if err != nil {
-		t.Fatalf("parse 失败: %v", err)
-	}
-	st := Summarize(offers)
-	// (100.94+101.97+105.06+107.64+108.15)/5
-	if math.Abs(st.Avg-104.752) > 1e-9 {
-		t.Errorf("Avg = %v, 期望 104.752", st.Avg)
-	}
-	if st.Min != 100.94 {
-		t.Errorf("Min = %v, 期望 100.94", st.Min)
-	}
-	if st.Max != 108.15 {
-		t.Errorf("Max = %v, 期望 108.15", st.Max)
-	}
-	if got := Summarize(nil); got != (Stats{}) {
-		t.Errorf("空切片应返回零值, 得到 %+v", got)
-	}
-}
-
 // 返回条数不足时必须报错，否则会拿不完整的样本算出偏低的均价而误报。
 func TestParseRejectsTooFewOffers(t *testing.T) {
 	body := []byte(`{"offers":[{"id":"a","price":5,"currency":"CNY"},{"id":"b","price":6,"currency":"CNY"}],"total":2}`)
