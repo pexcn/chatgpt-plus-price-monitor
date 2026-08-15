@@ -4,8 +4,7 @@ COPY . .
 RUN apk add --no-cache --virtual .build-deps git make \
   && make \
   && make install \
-  && apk del .build-deps \
-  && rm -rf /var/cache/apk/*
+  && apk del .build-deps
 
 FROM pexcn/docker-images:scratch
 LABEL maintainer="pexcn <pexcn97@gmail.com>"

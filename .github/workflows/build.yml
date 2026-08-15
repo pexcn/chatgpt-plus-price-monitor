@@ -1,0 +1,51 @@
+name: Build
+
+on:
+  push:
+    paths-ignore:
+      - '**.md'
+      - 'docker-compose.yml'
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Taipei
+
+jobs:
+  build-and-push:
+    name: Build image
+    uses: docker/github-builder/.github/workflows/build.yml@v1
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    with:
+      output: image
+      push: true
+      platforms: linux/amd64,linux/arm64
+      cache: true
+      cache-scope: ${{ github.repository }}-${{ github.ref_name }}
+      meta-images: |
+        ghcr.io/${{ github.repository }}
+      meta-tags: |
+        type=raw,value=latest
+    secrets:
+      registry-auths: |
+        - registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+  clean-untagged:
+    if: always()
+    needs: build-and-push
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    steps:
+      - name: Cleanup untagged images
+        # use actions/delete-package-versions instead?
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          delete-untagged: true
+          delete-ghost-images: true
+          delete-partial-images: true
+          delete-orphaned-images: true
