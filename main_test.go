@@ -85,6 +85,7 @@ func testConfig() *config {
 		interval:      30 * time.Minute,
 		sample:        30,
 		floorRatio:    0.5,
+		floorRatioSet: true,
 		top:           5,
 		cooldown:      24 * time.Hour,
 		failThreshold: 3,
@@ -403,6 +404,18 @@ func TestShortFlags(t *testing.T) {
 	}
 }
 
+func TestFloorRatioIsOptIn(t *testing.T) {
+	defaults, _ := parseFlags(nil)
+	if defaults.floorRatioSet || defaults.floorRatio != 0 {
+		t.Errorf("默认应关闭异常低价过滤: %+v", defaults)
+	}
+
+	enabled, _ := parseFlags([]string{"--floor-ratio", "0.1"})
+	if !enabled.floorRatioSet || enabled.floorRatio != 0.1 {
+		t.Errorf("显式指定后应启用异常低价过滤: %+v", enabled)
+	}
+}
+
 // 帮助里的选项顺序必须与 options 一致，且不能漏掉任何已注册的选项。
 func TestPrintOptionsOrderAndCoverage(t *testing.T) {
 	var buf bytes.Buffer
@@ -454,8 +467,8 @@ func TestValidate(t *testing.T) {
 		"阈值为 0":            func(c *config) { c.threshold = 0 },
 		"interval 为负":      func(c *config) { c.interval = -1 },
 		"sample 为 0":       func(c *config) { c.sample = 0 },
-		"floor-ratio 为 0":  func(c *config) { c.floorRatio = 0 },
-		"floor-ratio 超过 1": func(c *config) { c.floorRatio = 1.5 },
+		"floor-ratio 为 0":  func(c *config) { c.floorRatioSet = true; c.floorRatio = 0 },
+		"floor-ratio 超过 1": func(c *config) { c.floorRatioSet = true; c.floorRatio = 1.5 },
 		"超时为 0":            func(c *config) { c.timeout = 0 },
 	}
 	for name, mutate := range bad {

@@ -1,3 +1,5 @@
+.vscode/
+
 /chatgpt-plus-price-monitor
 /dist/
 *.exe

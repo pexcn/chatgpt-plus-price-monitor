@@ -24,9 +24,10 @@ type config struct {
 	threshold float64
 	interval  time.Duration
 
-	sample     int
-	floorRatio float64
-	top        int
+	sample        int
+	floorRatio    float64
+	floorRatioSet bool
+	top           int
 
 	cooldown      time.Duration
 	noRebound     bool
@@ -115,7 +116,7 @@ func newFlagSet(cfg *config, errorHandling flag.ErrorHandling) *flag.FlagSet {
 	fs.Float64Var(&cfg.threshold, "threshold", 10, "最便宜的可信报价低于该价格（元）时通知")
 	fs.DurationVar(&cfg.interval, "interval", 30*time.Minute, "轮询间隔，0 表示只检查一次就退出")
 	fs.IntVar(&cfg.sample, "sample", 30, "取多少条报价作为参考价位的样本")
-	fs.Float64Var(&cfg.floorRatio, "floor-ratio", 0.5, "低于 参考价位×该比例 的报价视为异常规格剔除")
+	fs.Float64Var(&cfg.floorRatio, "floor-ratio", 0, "启用地板线过滤：低于\"参考价位×该比例\"的报价将被剔除")
 	fs.IntVar(&cfg.top, "top", 5, "通知里列出最便宜的 N 条")
 	fs.DurationVar(&cfg.cooldown, "cooldown", 24*time.Hour, "持续低于阈值时的重复提醒间隔，0 表示只提醒一次")
 	fs.BoolVar(&cfg.noRebound, "no-rebound", false, "价格回升到阈值之上时不通知")
@@ -138,6 +139,11 @@ func parseFlags(args []string) (*config, *flag.FlagSet) {
 	cfg := &config{}
 	fs := newFlagSet(cfg, flag.ExitOnError)
 	_ = fs.Parse(args)
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "floor-ratio" {
+			cfg.floorRatioSet = true
+		}
+	})
 	return cfg, fs
 }
 
@@ -155,7 +161,7 @@ func newNotifier(httpc *http.Client) notifier {
 
 func usage(fs *flag.FlagSet) {
 	out := fs.Output()
-	fmt.Fprint(out, `监控 ChatGPT Plus 代充价格，低于阈值时 Telegram 通知。
+	fmt.Fprint(out, `监控 ChatGPT Plus 的价格，低于阈值时 Telegram 通知。
 
 Usage:
   chatgpt-plus-price-monitor [flags]
@@ -210,7 +216,7 @@ func (c *config) validate() error {
 		return fmt.Errorf("--interval 不能为负数")
 	case c.sample <= 0:
 		return fmt.Errorf("--sample 必须大于 0")
-	case c.floorRatio <= 0 || c.floorRatio > 1:
+	case c.floorRatioSet && (c.floorRatio <= 0 || c.floorRatio > 1):
 		return fmt.Errorf("--floor-ratio 必须在 0 和 1 之间")
 	case c.top <= 0:
 		return fmt.Errorf("--top 必须大于 0")
@@ -295,8 +301,13 @@ func logResult(cfg *config, a priceai.Analysis, best priceai.Offer, below bool) 
 	if below {
 		reached = "已达成"
 	}
-	log.Printf("最便宜的可信报价 %.2f 元（参考价位 %.2f，地板线 %.2f；剔除 %d 条异常），阈值 %.2f -> %s",
-		best.Price, a.Median, a.Floor, len(a.Dropped), cfg.threshold, reached)
+	if cfg.floorRatioSet {
+		log.Printf("最便宜的可信报价 %.2f 元（参考价位 %.2f，地板线 %.2f；剔除 %d 条异常），阈值 %.2f -> %s",
+			best.Price, a.Median, a.Floor, len(a.Dropped), cfg.threshold, reached)
+	} else {
+		log.Printf("最便宜的报价 %.2f 元（参考价位 %.2f；未启用异常低价过滤），阈值 %.2f -> %s",
+			best.Price, a.Median, cfg.threshold, reached)
+	}
 	if !cfg.verbose {
 		return
 	}
@@ -324,7 +335,7 @@ func buildMessage(action state.Action, cfg *config, a priceai.Analysis, best pri
 
 	fmt.Fprintf(&b, "最低可信报价：<b>%.2f</b> 元（阈值 %.2f）\n", best.Price, cfg.threshold)
 	fmt.Fprintf(&b, "参考价位 %.2f 元", a.Median)
-	if n := len(a.Dropped); n > 0 {
+	if n := len(a.Dropped); cfg.floorRatioSet && n > 0 {
 		fmt.Fprintf(&b, "，已剔除 %d 条低于 %.2f 元的异常报价", n, a.Floor)
 	}
 	b.WriteString("\n")
