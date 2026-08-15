@@ -129,7 +129,7 @@ func newFlagSet(cfg *config, errorHandling flag.ErrorHandling) *flag.FlagSet {
 	fs.BoolVar(&cfg.noRebound, "no-rebound", false, "价格回升到阈值之上时不通知")
 	fs.IntVar(&cfg.failThreshold, "fail-threshold", 3, "连续抓取失败 N 次后告警，0 表示关闭")
 	fs.DurationVar(&cfg.timeout, "timeout", 30*time.Second, "单次 HTTP 请求超时")
-	fs.BoolVar(&cfg.verbose, "verbose", false, "打印每条报价的店铺和标题")
+	fs.BoolVar(&cfg.verbose, "verbose", false, "显示详细日志，输出每条报价的店铺和标题")
 
 	fs.Usage = func() { usage(fs) }
 	return fs
