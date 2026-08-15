@@ -113,10 +113,11 @@ func TestOfferStoreFallback(t *testing.T) {
 
 // 请求必须带 limit=N&offset=0，否则取到的不是最便宜的那几个。
 func TestCheapestRequestParams(t *testing.T) {
-	var gotQuery, gotAccept string
+	var gotQuery string
+	var gotHeaders http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQuery = r.URL.RawQuery
-		gotAccept = r.Header.Get("Accept")
+		gotHeaders = r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(sampleResponse)
 	}))
@@ -137,8 +138,18 @@ func TestCheapestRequestParams(t *testing.T) {
 	if gotQuery != "limit=5&offset=0" {
 		t.Errorf("query = %q, 期望 limit=5&offset=0", gotQuery)
 	}
-	if gotAccept != "application/json" {
-		t.Errorf("Accept = %q", gotAccept)
+	for name, want := range map[string]string{
+		"User-Agent":      userAgent,
+		"Accept":          "*/*",
+		"Accept-Language": "zh-CN,zh;q=0.9",
+		"Cache-Control":   "no-cache",
+		"Pragma":          "no-cache",
+		"Referer":         ProductPage,
+		"Cookie":          "priceai_account_auth_hint=anonymous",
+	} {
+		if got := gotHeaders.Get(name); got != want {
+			t.Errorf("%s = %q, 期望 %q", name, got, want)
+		}
 	}
 }
 

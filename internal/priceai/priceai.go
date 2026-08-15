@@ -15,7 +15,7 @@ const (
 	// ProductPage 是放进通知里的人类可读页面。
 	ProductPage = "https://priceai.cc/products/chatgpt-plus"
 
-	userAgent = "chatgpt-plus-price-monitor/1.0 (+https://github.com/pexcn/chatgpt-plus-price-monitor)"
+	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
 )
 
 // apiEndpoint 是页面背后的报价接口，测试里会被替换成本地服务器。
@@ -62,8 +62,14 @@ func Cheapest(ctx context.Context, c *http.Client, n int) ([]Offer, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 模拟页面发起的同源 AJAX 请求的基础头部；不伪造 sec-* 浏览器指纹头。
 	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
+	req.Header.Set("Referer", ProductPage)
+	req.Header.Set("Cookie", "priceai_account_auth_hint=anonymous")
 
 	resp, err := c.Do(req)
 	if err != nil {
