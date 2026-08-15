@@ -245,7 +245,7 @@ func printOptions(out io.Writer, fs *flag.FlagSet) {
 		}
 		// 默认值为 0 / false 的开关不必写出来，是噪音。
 		if d := f.DefValue; d != "" && d != "false" && d != "0" {
-			help += fmt.Sprintf(" (default %s)", d)
+			help += fmt.Sprintf(" (default %s)", shortFlagDefault(f, d))
 		}
 		if len(head) > width {
 			width = len(head)
@@ -255,6 +255,21 @@ func printOptions(out io.Writer, fs *flag.FlagSet) {
 	for _, r := range rows {
 		fmt.Fprintf(out, "%-*s  %s\n", width, r.head, r.help)
 	}
+}
+
+func shortFlagDefault(f *flag.Flag, value string) string {
+	getter, ok := f.Value.(flag.Getter)
+	if !ok {
+		return value
+	}
+	if _, ok := getter.Get().(time.Duration); !ok {
+		return value
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return value
+	}
+	return shortDuration(d)
 }
 
 func (c *config) validate() error {
@@ -296,6 +311,9 @@ func intervalText(interval, jitter time.Duration) string {
 func shortDuration(d time.Duration) string {
 	if d == 0 {
 		return "0"
+	}
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", d/time.Hour)
 	}
 	if d%time.Minute == 0 {
 		return fmt.Sprintf("%dm", d/time.Minute)

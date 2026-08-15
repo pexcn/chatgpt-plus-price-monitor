@@ -471,6 +471,9 @@ func TestPrintOptionsOrderAndCoverage(t *testing.T) {
 	fs := newFlagSet(&config{}, flag.ContinueOnError)
 	printOptions(&buf, fs)
 	out := buf.String()
+	if !strings.Contains(out, "(default 24h)") || strings.Contains(out, "24h0m0s") {
+		t.Errorf("duration 默认值未使用简写格式:\n%s", out)
+	}
 
 	// 顺序：按 options 里的先后依次出现。
 	pos := -1
