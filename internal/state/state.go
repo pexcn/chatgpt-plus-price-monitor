@@ -78,8 +78,8 @@ const (
 	AlertBelow
 	// RemindBelow 表示价格持续低于阈值，且已过冷却期。
 	RemindBelow
-	// AlertRecover 表示价格回升到阈值之上。
-	AlertRecover
+	// AlertRebound 表示价格回升到阈值之上。
+	AlertRebound
 )
 
 func (a Action) String() string {
@@ -88,8 +88,8 @@ func (a Action) String() string {
 		return "alert"
 	case RemindBelow:
 		return "remind"
-	case AlertRecover:
-		return "recover"
+	case AlertRebound:
+		return "rebound"
 	default:
 		return "silent"
 	}
@@ -99,8 +99,8 @@ func (a Action) String() string {
 //
 // below         本轮均价是否低于阈值
 // cooldown      持续低于阈值时的重复提醒间隔；<=0 表示只在跌破的那一刻通知一次
-// notifyRecover 价格回升时是否也发一条
-func (s State) Decide(below bool, now time.Time, cooldown time.Duration, notifyRecover bool) Action {
+// notifyRebound 价格回升时是否也发一条
+func (s State) Decide(below bool, now time.Time, cooldown time.Duration, notifyRebound bool) Action {
 	if below {
 		if !s.Below {
 			return AlertBelow
@@ -110,8 +110,8 @@ func (s State) Decide(below bool, now time.Time, cooldown time.Duration, notifyR
 		}
 		return Silent
 	}
-	if s.Below && notifyRecover {
-		return AlertRecover
+	if s.Below && notifyRebound {
+		return AlertRebound
 	}
 	return Silent
 }

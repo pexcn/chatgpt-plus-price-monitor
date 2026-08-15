@@ -29,15 +29,16 @@ type config struct {
 
 	statePath     string
 	cooldown      time.Duration
-	notifyRecover bool
+	notifyRebound bool
 	failThreshold int
-
-	token   string
-	chatID  string
-	apiBase string
 
 	dryRun  bool
 	verbose bool
+}
+
+// notifier 发送一条通知。没配置 Telegram 凭据时为 nil，此时只记日志。
+type notifier interface {
+	Send(ctx context.Context, text string) error
 }
 
 func main() {
@@ -58,9 +59,18 @@ func main() {
 		return priceai.Cheapest(ctx, httpc, n)
 	}
 
+	notify := newNotifier(httpc)
+	switch {
+	case cfg.dryRun:
+		notify = nil
+		log.Print("dry-run：只打印结果，不发送通知、不写状态文件")
+	case notify == nil:
+		log.Print("未设置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID，只打印结果，不发送通知")
+	}
+
 	// interval 为 0 时跑一次就退出，交给 cron / systemd timer 调度。
 	if cfg.interval <= 0 {
-		if err := checkOnce(ctx, fetch, httpc, cfg); err != nil {
+		if err := checkOnce(ctx, fetch, notify, cfg); err != nil {
 			log.Printf("检查失败: %v", err)
 			os.Exit(1)
 		}
@@ -73,7 +83,7 @@ func main() {
 	ticker := time.NewTicker(cfg.interval)
 	defer ticker.Stop()
 	for {
-		if err := checkOnce(ctx, fetch, httpc, cfg); err != nil {
+		if err := checkOnce(ctx, fetch, notify, cfg); err != nil {
 			// 常驻模式下单次失败不退出，等下一轮重试。
 			log.Printf("检查失败: %v", err)
 		}
@@ -99,14 +109,8 @@ func newFlagSet(cfg *config, errorHandling flag.ErrorHandling) *flag.FlagSet {
 
 	fs.StringVar(&cfg.statePath, "state", "state.json", "状态文件路径，用于通知去重")
 	fs.DurationVar(&cfg.cooldown, "cooldown", 24*time.Hour, "价格持续低于阈值时的重复提醒间隔；为 0 表示只在跌破时提醒一次")
-	fs.BoolVar(&cfg.notifyRecover, "notify-recover", true, "价格回升到阈值之上时也发一条通知")
+	fs.BoolVar(&cfg.notifyRebound, "notify-rebound", true, "价格回升到阈值之上时也发一条通知")
 	fs.IntVar(&cfg.failThreshold, "fail-threshold", 3, "连续抓取失败 N 次后发告警（避免监控静默失效）；0 表示关闭")
-
-	// 凭据的默认值留空，解析后再回落到环境变量。
-	// 直接把 os.Getenv 当默认值会让 --help 把 token 原样打出来。
-	fs.StringVar(&cfg.token, "telegram-token", "", "Telegram Bot Token（建议改用环境变量 TELEGRAM_BOT_TOKEN）")
-	fs.StringVar(&cfg.chatID, "telegram-chat", "", "Telegram Chat ID（可用环境变量 TELEGRAM_CHAT_ID）")
-	fs.StringVar(&cfg.apiBase, "telegram-api", "", "Telegram API 地址，默认 https://api.telegram.org；国内直连不通时可指向自建 Bot API 或反代（环境变量 TELEGRAM_API_BASE）")
 
 	fs.BoolVar(&cfg.dryRun, "dry-run", false, "只抓取并打印结果，不发送通知、不写状态文件")
 	fs.BoolVar(&cfg.verbose, "verbose", false, "打印每条报价的店铺和标题")
@@ -119,23 +123,21 @@ func parseFlags(args []string) (*config, *flag.FlagSet) {
 	cfg := &config{}
 	fs := newFlagSet(cfg, flag.ExitOnError)
 	_ = fs.Parse(args)
-
-	// 命令行没给就用环境变量。
-	cfg.token = orEnv(cfg.token, "TELEGRAM_BOT_TOKEN", "")
-	cfg.chatID = orEnv(cfg.chatID, "TELEGRAM_CHAT_ID", "")
-	cfg.apiBase = orEnv(cfg.apiBase, "TELEGRAM_API_BASE", "https://api.telegram.org")
 	return cfg, fs
 }
 
-// orEnv 按 命令行 > 环境变量 > 默认值 的优先级取值。
-func orEnv(fromFlag, envKey, def string) string {
-	if fromFlag != "" {
-		return fromFlag
+// newNotifier 从环境变量读 Telegram 凭据。
+//
+// 凭据只从环境变量读、不做成命令行选项：写在命令行上同机器的其他人 ps 就能看到，
+// 而且一旦把 os.Getenv 当成 flag 的默认值，--help 就会把 token 原样打出来。
+//
+// 没配全凭据时返回 nil，调用方只记日志。
+func newNotifier(httpc *http.Client) notifier {
+	token, chatID := os.Getenv("TELEGRAM_BOT_TOKEN"), os.Getenv("TELEGRAM_CHAT_ID")
+	if token == "" || chatID == "" {
+		return nil
 	}
-	if v := os.Getenv(envKey); v != "" {
-		return v
-	}
-	return def
+	return &telegram.Client{Token: token, ChatID: chatID, HTTP: httpc}
 }
 
 func usage(fs *flag.FlagSet) {
@@ -143,9 +145,13 @@ func usage(fs *flag.FlagSet) {
 	fmt.Fprintf(out, "监控 ChatGPT Plus 代充价格，低于阈值时 Telegram 通知。\n\n用法:\n  %s [options]\n\n选项:\n", os.Args[0])
 	printOptions(out, fs)
 	fmt.Fprint(out, `
+Telegram 凭据只从环境变量读取（都设置了才会发通知，否则只打印日志）:
+  TELEGRAM_BOT_TOKEN    Bot Token
+  TELEGRAM_CHAT_ID      Chat ID
+
 示例:
-  # 先看看现在什么价（不发通知）
-  chatgpt-plus-price-monitor --dry-run --verbose
+  # 先看看现在什么价（没有环境变量，只打印）
+  chatgpt-plus-price-monitor --verbose
 
   # 常驻运行，每 30 分钟检查一次
   export TELEGRAM_BOT_TOKEN=123456:ABC...
@@ -184,25 +190,22 @@ func (c *config) validate() error {
 	if c.timeout <= 0 {
 		return fmt.Errorf("--timeout 必须大于 0")
 	}
-	if !c.dryRun && (c.token == "" || c.chatID == "") {
-		return fmt.Errorf("需要 Telegram 凭据：设置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 环境变量，或用 --telegram-token / --telegram-chat；也可以加 --dry-run 先只看结果")
-	}
 	return nil
 }
 
 // fetcher 取最便宜的 n 条报价。抽成函数类型是为了让测试能替换掉真实接口。
 type fetcher func(ctx context.Context, n int) ([]priceai.Offer, error)
 
-func checkOnce(ctx context.Context, fetch fetcher, httpc *http.Client, cfg *config) error {
+func checkOnce(ctx context.Context, fetch fetcher, notify notifier, cfg *config) error {
 	offers, fetchErr := fetch(ctx, cfg.top)
 
-	// dry-run 只看结果，不读写状态、不发通知。
-	if cfg.dryRun {
+	// 不发通知时也不碰状态文件：否则等你配好凭据，第一次降价会因为
+	// 状态里已经记着"低于阈值"而被当成重复通知吞掉。
+	if notify == nil {
 		if fetchErr != nil {
 			return fetchErr
 		}
 		logResult(cfg, offers, priceai.Summarize(offers))
-		log.Print("dry-run：跳过通知")
 		return nil
 	}
 
@@ -210,24 +213,22 @@ func checkOnce(ctx context.Context, fetch fetcher, httpc *http.Client, cfg *conf
 	if err != nil {
 		return fmt.Errorf("读取状态文件失败: %w", err)
 	}
-	tg := &telegram.Client{Token: cfg.token, ChatID: cfg.chatID, HTTP: httpc, BaseURL: cfg.apiBase}
-
 	if fetchErr != nil {
-		return reportFailure(ctx, tg, cfg, prev, fetchErr)
+		return reportFailure(ctx, notify, cfg, prev, fetchErr)
 	}
-	return reportPrice(ctx, tg, cfg, prev, offers)
+	return reportPrice(ctx, notify, cfg, prev, offers)
 }
 
 // reportFailure 处理抓取失败：累计次数，达到阈值时告警一次。
 //
 // 无论有没有发通知都原样返回抓取错误，让单次模式保持非 0 退出码。
-func reportFailure(ctx context.Context, tg *telegram.Client, cfg *config, prev state.State, cause error) error {
+func reportFailure(ctx context.Context, notify notifier, cfg *config, prev state.State, cause error) error {
 	next := prev
 	next.Failures++
 
 	// 一轮故障只告警一次，恢复后才会重新武装。
 	if cfg.failThreshold > 0 && next.Failures >= cfg.failThreshold && !prev.FailNotified {
-		if err := tg.Send(ctx, buildFailureMessage(next.Failures, cause)); err != nil {
+		if err := notify.Send(ctx, buildFailureMessage(next.Failures, cause)); err != nil {
 			// 通知本身也失败了（比如整个网络都不通），保持未告警状态下轮重试。
 			log.Printf("发送失败告警时出错: %v", err)
 		} else {
@@ -243,7 +244,7 @@ func reportFailure(ctx context.Context, tg *telegram.Client, cfg *config, prev s
 }
 
 // reportPrice 处理抓取成功：先补一条恢复通知（如果之前告过警），再走价格判断。
-func reportPrice(ctx context.Context, tg *telegram.Client, cfg *config, prev state.State, offers []priceai.Offer) error {
+func reportPrice(ctx context.Context, notify notifier, cfg *config, prev state.State, offers []priceai.Offer) error {
 	st := priceai.Summarize(offers)
 	below := st.Avg <= cfg.threshold
 	logResult(cfg, offers, st)
@@ -254,7 +255,7 @@ func reportPrice(ctx context.Context, tg *telegram.Client, cfg *config, prev sta
 	next.FailNotified = false
 
 	if prev.FailNotified {
-		if err := tg.Send(ctx, buildRecoveryMessage(prev.Failures)); err != nil {
+		if err := notify.Send(ctx, buildRecoveryMessage(prev.Failures)); err != nil {
 			log.Printf("发送恢复通知时出错: %v", err)
 		} else {
 			log.Print("已发送抓取恢复通知")
@@ -262,13 +263,13 @@ func reportPrice(ctx context.Context, tg *telegram.Client, cfg *config, prev sta
 	}
 
 	now := time.Now()
-	action := prev.Decide(below, now, cfg.cooldown, cfg.notifyRecover)
+	action := prev.Decide(below, now, cfg.cooldown, cfg.notifyRebound)
 	if action == state.Silent {
 		// 状态本身仍要更新，否则跌破后的第一条提醒会重复发。
 		return state.Save(cfg.statePath, next)
 	}
 
-	if err := tg.Send(ctx, buildMessage(action, cfg, offers, st, prev.LastAvg)); err != nil {
+	if err := notify.Send(ctx, buildMessage(action, cfg, offers, st, prev.LastAvg)); err != nil {
 		return err
 	}
 	log.Printf("已发送 Telegram 通知 (%s)", action)
@@ -299,13 +300,13 @@ func buildMessage(action state.Action, cfg *config, offers []priceai.Offer, st p
 		b.WriteString("🔻 <b>ChatGPT Plus 降价提醒</b>\n\n")
 	case state.RemindBelow:
 		b.WriteString("🔻 <b>ChatGPT Plus 仍在低价</b>\n\n")
-	case state.AlertRecover:
+	case state.AlertRebound:
 		b.WriteString("🔺 <b>ChatGPT Plus 价格回升</b>\n\n")
 	}
 
 	fmt.Fprintf(&b, "最便宜的 %d 个均价：<b>%.2f</b> 元（阈值 %.2f）\n", cfg.top, st.Avg, cfg.threshold)
 	fmt.Fprintf(&b, "最低 %.2f / 最高 %.2f\n", st.Min, st.Max)
-	if action == state.AlertRecover && prevAvg > 0 {
+	if action == state.AlertRebound && prevAvg > 0 {
 		fmt.Fprintf(&b, "上次通知时为 %.2f 元\n", prevAvg)
 	}
 

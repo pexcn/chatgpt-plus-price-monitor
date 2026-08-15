@@ -19,6 +19,7 @@ import (
 
 	"github.com/pexcn/chatgpt-plus-price-monitor/internal/priceai"
 	"github.com/pexcn/chatgpt-plus-price-monitor/internal/state"
+	"github.com/pexcn/chatgpt-plus-price-monitor/internal/telegram"
 )
 
 // fakeTelegram 记录所有发出的消息。
@@ -45,6 +46,11 @@ func newFakeTelegram(t *testing.T) *fakeTelegram {
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// client 返回一个指向假服务器的 notifier。
+func (f *fakeTelegram) client() notifier {
+	return &telegram.Client{Token: "111:AAA", ChatID: "42", HTTP: f.srv.Client(), BaseURL: f.srv.URL}
 }
 
 func (f *fakeTelegram) messages() []string {
@@ -74,7 +80,7 @@ func stubFetch(offers []priceai.Offer) fetcher {
 	}
 }
 
-func testConfig(t *testing.T, tg *fakeTelegram) *config {
+func testConfig(t *testing.T) *config {
 	t.Helper()
 	return &config{
 		top:           5,
@@ -82,21 +88,19 @@ func testConfig(t *testing.T, tg *fakeTelegram) *config {
 		timeout:       5 * time.Second,
 		statePath:     filepath.Join(t.TempDir(), "state.json"),
 		cooldown:      24 * time.Hour,
-		notifyRecover: true,
-		token:         "111:AAA",
-		chatID:        "42",
-		apiBase:       tg.srv.URL,
+		notifyRebound: true,
+		failThreshold: 3,
 	}
 }
 
 // 跌破阈值发一次，之后在冷却期内保持静默。
 func TestCheckOnceAlertsOnceThenStaysSilent(t *testing.T) {
 	tg := newFakeTelegram(t)
-	cfg := testConfig(t, tg)
+	cfg := testConfig(t)
 	fetch := stubFetch(offersAt(8.8, 9.0, 9.5, 10.0, 11.2)) // 均价 9.70
 
 	for i := 0; i < 3; i++ {
-		if err := checkOnce(context.Background(), fetch, tg.srv.Client(), cfg); err != nil {
+		if err := checkOnce(context.Background(), fetch, tg.client(), cfg); err != nil {
 			t.Fatalf("第 %d 次 checkOnce 失败: %v", i+1, err)
 		}
 	}
@@ -119,18 +123,18 @@ func TestCheckOnceAlertsOnceThenStaysSilent(t *testing.T) {
 // 价格回升后应发一条回升通知，并带上上次的均价。
 func TestCheckOnceNotifiesOnRecover(t *testing.T) {
 	tg := newFakeTelegram(t)
-	cfg := testConfig(t, tg)
-	httpc := tg.srv.Client()
+	cfg := testConfig(t)
+	n := tg.client()
 	ctx := context.Background()
 
-	if err := checkOnce(ctx, stubFetch(offersAt(8, 8, 8, 8, 8)), httpc, cfg); err != nil {
+	if err := checkOnce(ctx, stubFetch(offersAt(8, 8, 8, 8, 8)), n, cfg); err != nil {
 		t.Fatalf("checkOnce 失败: %v", err)
 	}
-	if err := checkOnce(ctx, stubFetch(offersAt(20, 20, 20, 20, 20)), httpc, cfg); err != nil {
+	if err := checkOnce(ctx, stubFetch(offersAt(20, 20, 20, 20, 20)), n, cfg); err != nil {
 		t.Fatalf("checkOnce 失败: %v", err)
 	}
 	// 回升后再跑一次应保持静默。
-	if err := checkOnce(ctx, stubFetch(offersAt(20, 20, 20, 20, 20)), httpc, cfg); err != nil {
+	if err := checkOnce(ctx, stubFetch(offersAt(20, 20, 20, 20, 20)), n, cfg); err != nil {
 		t.Fatalf("checkOnce 失败: %v", err)
 	}
 
@@ -149,10 +153,10 @@ func TestCheckOnceNotifiesOnRecover(t *testing.T) {
 // 一直高于阈值时一条都不该发。
 func TestCheckOnceSilentWhenAlwaysExpensive(t *testing.T) {
 	tg := newFakeTelegram(t)
-	cfg := testConfig(t, tg)
+	cfg := testConfig(t)
 	fetch := stubFetch(offersAt(100.94, 101.97, 105.06, 107.64, 108.15))
 
-	if err := checkOnce(context.Background(), fetch, tg.srv.Client(), cfg); err != nil {
+	if err := checkOnce(context.Background(), fetch, tg.client(), cfg); err != nil {
 		t.Fatalf("checkOnce 失败: %v", err)
 	}
 	if n := len(tg.messages()); n != 0 {
@@ -163,10 +167,10 @@ func TestCheckOnceSilentWhenAlwaysExpensive(t *testing.T) {
 // dry-run 不发通知也不写状态文件。
 func TestCheckOnceDryRun(t *testing.T) {
 	tg := newFakeTelegram(t)
-	cfg := testConfig(t, tg)
+	cfg := testConfig(t)
 	cfg.dryRun = true
 
-	if err := checkOnce(context.Background(), stubFetch(offersAt(1, 1, 1, 1, 1)), tg.srv.Client(), cfg); err != nil {
+	if err := checkOnce(context.Background(), stubFetch(offersAt(1, 1, 1, 1, 1)), nil, cfg); err != nil {
 		t.Fatalf("checkOnce 失败: %v", err)
 	}
 	if n := len(tg.messages()); n != 0 {
@@ -186,14 +190,14 @@ func failingFetch(msg string) fetcher {
 // 连续失败达到阈值才告警，且一轮故障只告一次。
 func TestCheckOnceAlertsAfterConsecutiveFailures(t *testing.T) {
 	tg := newFakeTelegram(t)
-	cfg := testConfig(t, tg)
+	cfg := testConfig(t)
 	cfg.failThreshold = 3
 	fetch := failingFetch("接口只返回了 0 条报价")
 	ctx := context.Background()
 
 	// 前两次失败不该发通知，但都要把错误抛出去（单次模式靠它拿非 0 退出码）。
 	for i := 1; i <= 2; i++ {
-		if err := checkOnce(ctx, fetch, tg.srv.Client(), cfg); err == nil {
+		if err := checkOnce(ctx, fetch, tg.client(), cfg); err == nil {
 			t.Fatalf("第 %d 次应返回错误", i)
 		}
 		if n := len(tg.messages()); n != 0 {
@@ -202,7 +206,7 @@ func TestCheckOnceAlertsAfterConsecutiveFailures(t *testing.T) {
 	}
 
 	// 第三次达到阈值，发一条。
-	if err := checkOnce(ctx, fetch, tg.srv.Client(), cfg); err == nil {
+	if err := checkOnce(ctx, fetch, tg.client(), cfg); err == nil {
 		t.Fatal("第 3 次应返回错误")
 	}
 	msgs := tg.messages()
@@ -219,7 +223,7 @@ func TestCheckOnceAlertsAfterConsecutiveFailures(t *testing.T) {
 
 	// 继续失败不再重复告警。
 	for i := 0; i < 3; i++ {
-		_ = checkOnce(ctx, fetch, tg.srv.Client(), cfg)
+		_ = checkOnce(ctx, fetch, tg.client(), cfg)
 	}
 	if n := len(tg.messages()); n != 1 {
 		t.Errorf("持续故障期间发了 %d 条通知，期望仍是 1 条", n)
@@ -229,20 +233,20 @@ func TestCheckOnceAlertsAfterConsecutiveFailures(t *testing.T) {
 // 抓取恢复后要补一条恢复通知，并把失败计数清零。
 func TestCheckOnceNotifiesOnFetchRecovery(t *testing.T) {
 	tg := newFakeTelegram(t)
-	cfg := testConfig(t, tg)
+	cfg := testConfig(t)
 	cfg.failThreshold = 2
-	httpc := tg.srv.Client()
+	n := tg.client()
 	ctx := context.Background()
 
 	for i := 0; i < 2; i++ {
-		_ = checkOnce(ctx, failingFetch("boom"), httpc, cfg)
+		_ = checkOnce(ctx, failingFetch("boom"), n, cfg)
 	}
 	if n := len(tg.messages()); n != 1 {
 		t.Fatalf("故障期发了 %d 条，期望 1 条", n)
 	}
 
 	// 恢复，且价格很贵（不会触发降价通知），只应有恢复通知。
-	if err := checkOnce(ctx, stubFetch(offersAt(100, 100, 100, 100, 100)), httpc, cfg); err != nil {
+	if err := checkOnce(ctx, stubFetch(offersAt(100, 100, 100, 100, 100)), n, cfg); err != nil {
 		t.Fatalf("checkOnce 失败: %v", err)
 	}
 	msgs := tg.messages()
@@ -262,7 +266,7 @@ func TestCheckOnceNotifiesOnFetchRecovery(t *testing.T) {
 	}
 
 	// 再失败一次不该立刻告警（计数已清零，阈值是 2）。
-	_ = checkOnce(ctx, failingFetch("boom"), httpc, cfg)
+	_ = checkOnce(ctx, failingFetch("boom"), n, cfg)
 	if n := len(tg.messages()); n != 2 {
 		t.Errorf("恢复后第一次失败就告警了，期望仍是 2 条，得到 %d", n)
 	}
@@ -271,11 +275,11 @@ func TestCheckOnceNotifiesOnFetchRecovery(t *testing.T) {
 // fail-threshold 为 0 时关闭该功能。
 func TestCheckOnceFailAlertDisabled(t *testing.T) {
 	tg := newFakeTelegram(t)
-	cfg := testConfig(t, tg)
+	cfg := testConfig(t)
 	cfg.failThreshold = 0
 
 	for i := 0; i < 5; i++ {
-		_ = checkOnce(context.Background(), failingFetch("boom"), tg.srv.Client(), cfg)
+		_ = checkOnce(context.Background(), failingFetch("boom"), tg.client(), cfg)
 	}
 	if n := len(tg.messages()); n != 0 {
 		t.Errorf("关闭时发了 %d 条通知，期望 0 条", n)
@@ -302,13 +306,13 @@ func TestCheckOnceRetriesAlertWhenSendFails(t *testing.T) {
 	cfg := &config{
 		top: 5, threshold: 10, timeout: 5 * time.Second,
 		statePath: filepath.Join(t.TempDir(), "state.json"),
-		cooldown:  24 * time.Hour, notifyRecover: true, failThreshold: 1,
-		token: "111:AAA", chatID: "42", apiBase: srv.URL,
+		cooldown:  24 * time.Hour, notifyRebound: true, failThreshold: 1,
 	}
+	n := &telegram.Client{Token: "111:AAA", ChatID: "42", HTTP: srv.Client(), BaseURL: srv.URL}
 	ctx := context.Background()
 
 	// 第一次：达到阈值但通知发不出去。
-	_ = checkOnce(ctx, failingFetch("boom"), srv.Client(), cfg)
+	_ = checkOnce(ctx, failingFetch("boom"), n, cfg)
 	st, _ := state.Load(cfg.statePath)
 	if st.FailNotified {
 		t.Fatal("通知发送失败时不应标记为已告警")
@@ -316,7 +320,7 @@ func TestCheckOnceRetriesAlertWhenSendFails(t *testing.T) {
 
 	// 第二次：Telegram 恢复了，应当补发。
 	fail.Store(false)
-	_ = checkOnce(ctx, failingFetch("boom"), srv.Client(), cfg)
+	_ = checkOnce(ctx, failingFetch("boom"), n, cfg)
 	if sent.Load() != 1 {
 		t.Errorf("补发了 %d 条，期望 1 条", sent.Load())
 	}
@@ -328,18 +332,16 @@ func TestCheckOnceRetriesAlertWhenSendFails(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	base := func() *config {
-		return &config{top: 5, threshold: 10, timeout: time.Second, token: "t", chatID: "c"}
+		return &config{top: 5, threshold: 10, timeout: time.Second}
 	}
 	if err := base().validate(); err != nil {
 		t.Errorf("合法配置不应报错: %v", err)
 	}
 
 	bad := map[string]func(*config){
-		"top 为 0":   func(c *config) { c.top = 0 },
-		"阈值为 0":     func(c *config) { c.threshold = 0 },
-		"超时为 0":     func(c *config) { c.timeout = 0 },
-		"缺 token":   func(c *config) { c.token = "" },
-		"缺 chat id": func(c *config) { c.chatID = "" },
+		"top 为 0": func(c *config) { c.top = 0 },
+		"阈值为 0":   func(c *config) { c.threshold = 0 },
+		"超时为 0":   func(c *config) { c.timeout = 0 },
 	}
 	for name, mutate := range bad {
 		c := base()
@@ -348,50 +350,82 @@ func TestValidate(t *testing.T) {
 			t.Errorf("%s 时期望报错", name)
 		}
 	}
-
-	// dry-run 下不需要 Telegram 凭据。
-	c := base()
-	c.token, c.chatID, c.dryRun = "", "", true
-	if err := c.validate(); err != nil {
-		t.Errorf("dry-run 不该要求凭据: %v", err)
-	}
 }
 
-// 取值优先级：命令行 > 环境变量 > 默认值。
-func TestOrEnv(t *testing.T) {
-	const key = "TEST_ORENV_KEY"
-	t.Setenv(key, "from-env")
-	if got := orEnv("from-flag", key, "fallback"); got != "from-flag" {
-		t.Errorf("命令行应优先, 得到 %q", got)
-	}
-	if got := orEnv("", key, "fallback"); got != "from-env" {
-		t.Errorf("应回落到环境变量, 得到 %q", got)
-	}
-	t.Setenv(key, "")
-	if got := orEnv("", key, "fallback"); got != "fallback" {
-		t.Errorf("环境变量为空时应用默认值, 得到 %q", got)
-	}
-}
-
-// --help 不能把凭据打出来：环境变量里的 token 绝不能成为 flag 的默认值。
-func TestUsageDoesNotLeakCredentials(t *testing.T) {
+// 凭据只从环境变量读，不应有对应的命令行选项，帮助信息里自然也不会泄露。
+func TestNoCredentialFlagsAndNoLeak(t *testing.T) {
 	const secret = "123456:SUPER-SECRET"
 	t.Setenv("TELEGRAM_BOT_TOKEN", secret)
 	t.Setenv("TELEGRAM_CHAT_ID", "99887766")
 
-	cfg, fs := parseFlags(nil)
+	_, fs := parseFlags(nil)
 	var buf bytes.Buffer
 	fs.SetOutput(&buf)
 	fs.Usage()
+	out := buf.String()
 
 	for _, leaked := range []string{secret, "99887766"} {
-		if strings.Contains(buf.String(), leaked) {
-			t.Errorf("帮助信息泄露了凭据 %q:\n%s", leaked, buf.String())
+		if strings.Contains(out, leaked) {
+			t.Errorf("帮助信息泄露了凭据 %q:\n%s", leaked, out)
 		}
 	}
-	// 泄露修掉了，但环境变量本身仍要生效。
-	if cfg.token != secret || cfg.chatID != "99887766" {
-		t.Errorf("环境变量没有生效: token=%q chatID=%q", cfg.token, cfg.chatID)
+	for _, gone := range []string{"telegram-token", "telegram-chat", "telegram-api"} {
+		if fs.Lookup(gone) != nil {
+			t.Errorf("选项 --%s 应当已被移除", gone)
+		}
+	}
+}
+
+// 两个环境变量都设置了才发通知，否则只记日志。
+func TestNewNotifier(t *testing.T) {
+	cases := []struct {
+		name          string
+		token, chatID string
+		want          bool
+	}{
+		{"都设置了", "111:AAA", "42", true},
+		{"只有 token", "111:AAA", "", false},
+		{"只有 chat id", "", "42", false},
+		{"都没设置", "", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("TELEGRAM_BOT_TOKEN", c.token)
+			t.Setenv("TELEGRAM_CHAT_ID", c.chatID)
+			if got := newNotifier(http.DefaultClient); (got != nil) != c.want {
+				t.Errorf("newNotifier() != nil = %v, 期望 %v", got != nil, c.want)
+			}
+		})
+	}
+}
+
+// 没有凭据时不能写状态文件：否则等配好凭据，第一次降价会被当成重复通知吞掉。
+func TestCheckOnceLogOnlyLeavesStateUntouched(t *testing.T) {
+	cfg := testConfig(t)
+
+	// 先以只记日志的方式跑一轮低价。
+	if err := checkOnce(context.Background(), stubFetch(offersAt(1, 1, 1, 1, 1)), nil, cfg); err != nil {
+		t.Fatalf("checkOnce 失败: %v", err)
+	}
+	if _, err := os.Stat(cfg.statePath); !os.IsNotExist(err) {
+		t.Fatal("只记日志时不应写状态文件")
+	}
+
+	// 之后配上凭据，第一次仍应正常告警。
+	tg := newFakeTelegram(t)
+	if err := checkOnce(context.Background(), stubFetch(offersAt(1, 1, 1, 1, 1)), tg.client(), cfg); err != nil {
+		t.Fatalf("checkOnce 失败: %v", err)
+	}
+	if n := len(tg.messages()); n != 1 {
+		t.Errorf("配上凭据后应发 1 条降价通知，实际 %d 条", n)
+	}
+}
+
+// 抓取失败时，只记日志模式也要把错误返回（单次模式靠它拿非 0 退出码）。
+func TestCheckOnceLogOnlyStillReportsFetchError(t *testing.T) {
+	cfg := testConfig(t)
+	if err := checkOnce(context.Background(), failingFetch("boom"), nil, cfg); err == nil {
+		t.Fatal("期望返回抓取错误")
 	}
 }
 
@@ -402,7 +436,7 @@ func TestPrintOptionsUsesDoubleDash(t *testing.T) {
 	printOptions(&buf, fs)
 
 	out := buf.String()
-	for _, name := range []string{"--top", "--threshold", "--dry-run", "--fail-threshold", "--telegram-token", "--notify-recover"} {
+	for _, name := range []string{"--top", "--threshold", "--dry-run", "--fail-threshold", "--notify-rebound"} {
 		if !strings.Contains(out, name) {
 			t.Errorf("帮助里缺少 %s:\n%s", name, out)
 		}
@@ -415,33 +449,13 @@ func TestPrintOptionsUsesDoubleDash(t *testing.T) {
 	}
 }
 
-// 双横线和单横线都要能解析（Go 的 flag 包两者等价），且命令行优先于环境变量。
+// 双横线和单横线都要能解析（Go 的 flag 包两者等价）。
 func TestParseFlagsAcceptsDoubleDash(t *testing.T) {
-	t.Setenv("TELEGRAM_BOT_TOKEN", "envtok")
-	t.Setenv("TELEGRAM_CHAT_ID", "envchat")
-
 	cfg, _ := parseFlags([]string{"--top", "8", "--threshold", "12.5", "--dry-run", "--fail-threshold", "0"})
 	if cfg.top != 8 || cfg.threshold != 12.5 || !cfg.dryRun || cfg.failThreshold != 0 {
 		t.Errorf("双横线解析结果不对: %+v", cfg)
 	}
-	// 未指定时回落到环境变量。
-	if cfg.token != "envtok" || cfg.chatID != "envchat" {
-		t.Errorf("环境变量回落失败: token=%q chat=%q", cfg.token, cfg.chatID)
-	}
-	// 默认的 telegram-api。
-	if cfg.apiBase != "https://api.telegram.org" {
-		t.Errorf("apiBase = %q", cfg.apiBase)
-	}
-
-	// 命令行覆盖环境变量。
-	cfg2, _ := parseFlags([]string{"--telegram-token", "flagtok", "--telegram-chat", "flagchat"})
-	if cfg2.token != "flagtok" || cfg2.chatID != "flagchat" {
-		t.Errorf("命令行未能覆盖环境变量: token=%q chat=%q", cfg2.token, cfg2.chatID)
-	}
-
-	// 单横线同样可用。
-	cfg3, _ := parseFlags([]string{"-top", "3"})
-	if cfg3.top != 3 {
+	if cfg3, _ := parseFlags([]string{"-top", "3"}); cfg3.top != 3 {
 		t.Errorf("单横线解析失败: top=%d", cfg3.top)
 	}
 }

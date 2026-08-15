@@ -16,56 +16,56 @@ func TestDecide(t *testing.T) {
 		prev          State
 		below         bool
 		cooldown      time.Duration
-		notifyRecover bool
+		notifyRebound bool
 		want          Action
 	}{
 		{
 			name:  "首次跌破阈值",
 			prev:  State{Below: false},
-			below: true, cooldown: day, notifyRecover: true,
+			below: true, cooldown: day, notifyRebound: true,
 			want: AlertBelow,
 		},
 		{
 			name:  "持续低价且在冷却期内则静默",
 			prev:  State{Below: true, LastNotify: now.Add(-2 * time.Hour)},
-			below: true, cooldown: day, notifyRecover: true,
+			below: true, cooldown: day, notifyRebound: true,
 			want: Silent,
 		},
 		{
 			name:  "持续低价且已过冷却期则重提醒",
 			prev:  State{Below: true, LastNotify: now.Add(-25 * time.Hour)},
-			below: true, cooldown: day, notifyRecover: true,
+			below: true, cooldown: day, notifyRebound: true,
 			want: RemindBelow,
 		},
 		{
 			name:  "cooldown 为 0 时永不重复提醒",
 			prev:  State{Below: true, LastNotify: now.Add(-365 * day)},
-			below: true, cooldown: 0, notifyRecover: true,
+			below: true, cooldown: 0, notifyRebound: true,
 			want: Silent,
 		},
 		{
 			name:  "价格回升且开启回升通知",
 			prev:  State{Below: true, LastNotify: now.Add(-time.Hour), LastAvg: 9.2},
-			below: false, cooldown: day, notifyRecover: true,
-			want: AlertRecover,
+			below: false, cooldown: day, notifyRebound: true,
+			want: AlertRebound,
 		},
 		{
 			name:  "价格回升但关闭回升通知",
 			prev:  State{Below: true, LastNotify: now.Add(-time.Hour)},
-			below: false, cooldown: day, notifyRecover: false,
+			below: false, cooldown: day, notifyRebound: false,
 			want: Silent,
 		},
 		{
 			name:  "一直高于阈值",
 			prev:  State{Below: false},
-			below: false, cooldown: day, notifyRecover: true,
+			below: false, cooldown: day, notifyRebound: true,
 			want: Silent,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.prev.Decide(tt.below, now, tt.cooldown, tt.notifyRecover); got != tt.want {
+			if got := tt.prev.Decide(tt.below, now, tt.cooldown, tt.notifyRebound); got != tt.want {
 				t.Errorf("Decide() = %v, 期望 %v", got, tt.want)
 			}
 		})
