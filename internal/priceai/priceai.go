@@ -70,6 +70,13 @@ func Cheapest(ctx context.Context, c *http.Client, n int) ([]Offer, error) {
 	req.Header.Set("Pragma", "no-cache")
 	req.Header.Set("Referer", ProductPage)
 	req.Header.Set("Cookie", "priceai_account_auth_hint=anonymous")
+	req.Header.Set("Priority", "u=1, i")
+	req.Header.Set("Sec-CH-UA", `"Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"`)
+	req.Header.Set("Sec-CH-UA-Mobile", "?0")
+	req.Header.Set("Sec-CH-UA-Platform", `"Windows"`)
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 
 	resp, err := c.Do(req)
 	if err != nil {

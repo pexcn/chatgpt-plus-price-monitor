@@ -404,6 +404,50 @@ func TestShortFlags(t *testing.T) {
 	}
 }
 
+func TestIntervalJitter(t *testing.T) {
+	defaults, _ := parseFlags(nil)
+	if defaults.interval != 3*time.Minute || defaults.jitter != time.Minute {
+		t.Errorf("默认 interval = %s:%s，期望 3m:1m", defaults.interval, defaults.jitter)
+	}
+
+	fixed, _ := parseFlags([]string{"--interval", "3m"})
+	if fixed.interval != 3*time.Minute || fixed.jitter != 0 {
+		t.Errorf("固定 interval = %s:%s，期望 3m:0s", fixed.interval, fixed.jitter)
+	}
+
+	jittered, _ := parseFlags([]string{"--interval", "3m:1m"})
+	if jittered.interval != 3*time.Minute || jittered.jitter != time.Minute {
+		t.Errorf("抖动 interval = %s:%s，期望 3m:1m", jittered.interval, jittered.jitter)
+	}
+
+	once, _ := parseFlags([]string{"--interval", "0"})
+	if once.interval != 0 || once.jitter != 0 {
+		t.Errorf("单次 interval = %s:%s，期望 0s:0s", once.interval, once.jitter)
+	}
+}
+
+func TestIntervalFlagRejectsInvalidValues(t *testing.T) {
+	for _, value := range []string{"3m:1m:1s", "bad", "3m:bad"} {
+		cfg := &config{}
+		f := intervalFlag{cfg: cfg}
+		if err := f.Set(value); err == nil {
+			t.Errorf("Set(%q) 应返回错误", value)
+		}
+	}
+}
+
+func TestRandomJitterRange(t *testing.T) {
+	const max = time.Minute
+	if got := randomJitter(0); got != 0 {
+		t.Errorf("randomJitter(0) = %s", got)
+	}
+	for i := 0; i < 100; i++ {
+		if got := randomJitter(max); got < 0 || got > max {
+			t.Fatalf("randomJitter(%s) = %s，超出范围", max, got)
+		}
+	}
+}
+
 func TestFloorRatioIsOptIn(t *testing.T) {
 	defaults, _ := parseFlags(nil)
 	if defaults.floorRatioSet || defaults.floorRatio != 0 {
@@ -466,6 +510,8 @@ func TestValidate(t *testing.T) {
 		"top 为 0":          func(c *config) { c.top = 0 },
 		"阈值为 0":            func(c *config) { c.threshold = 0 },
 		"interval 为负":      func(c *config) { c.interval = -1 },
+		"interval 抖动为负":    func(c *config) { c.jitter = -1 },
+		"单次模式带抖动":          func(c *config) { c.interval = 0; c.jitter = time.Second },
 		"sample 为 0":       func(c *config) { c.sample = 0 },
 		"floor-ratio 为 0":  func(c *config) { c.floorRatioSet = true; c.floorRatio = 0 },
 		"floor-ratio 超过 1": func(c *config) { c.floorRatioSet = true; c.floorRatio = 1.5 },

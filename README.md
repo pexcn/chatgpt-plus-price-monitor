@@ -24,7 +24,7 @@
 ```sh
 export TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
 export TELEGRAM_CHAT_ID=123456789
-./chatgpt-plus-price-monitor -i 30m -n 5 -t 10
+./chatgpt-plus-price-monitor -i 3m:1m -n 5 -t 10
 ```
 
 ## 选项
@@ -32,7 +32,7 @@ export TELEGRAM_CHAT_ID=123456789
 | 选项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `-t, --threshold` | `10` | 最便宜的可信报价低于该价格（元）时通知 |
-| `-i, --interval` | `30m` | 轮询间隔，`0` 表示只检查一次就退出 |
+| `-i, --interval` | `3m:1m` | 轮询基础间隔和最大抖动；`3m:1m` 表示每隔 3~4 分钟检查，`3m` 表示不抖动，`0` 表示只检查一次 |
 | `-s, --sample` | `30` | 取多少条报价作为参考价位的样本 |
 | `--floor-ratio` | 关闭 | 启用地板线过滤；低于"参考价位×该比例"的报价会被剔除 |
 | `-n, --top` | `5` | 通知里列出最便宜的 N 条 |

@@ -139,13 +139,20 @@ func TestCheapestRequestParams(t *testing.T) {
 		t.Errorf("query = %q, 期望 limit=5&offset=0", gotQuery)
 	}
 	for name, want := range map[string]string{
-		"User-Agent":      userAgent,
-		"Accept":          "*/*",
-		"Accept-Language": "zh-CN,zh;q=0.9",
-		"Cache-Control":   "no-cache",
-		"Pragma":          "no-cache",
-		"Referer":         ProductPage,
-		"Cookie":          "priceai_account_auth_hint=anonymous",
+		"User-Agent":         userAgent,
+		"Accept":             "*/*",
+		"Accept-Language":    "zh-CN,zh;q=0.9",
+		"Cache-Control":      "no-cache",
+		"Pragma":             "no-cache",
+		"Referer":            ProductPage,
+		"Cookie":             "priceai_account_auth_hint=anonymous",
+		"Priority":           "u=1, i",
+		"Sec-CH-UA":          `"Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"`,
+		"Sec-CH-UA-Mobile":   "?0",
+		"Sec-CH-UA-Platform": `"Windows"`,
+		"Sec-Fetch-Dest":     "empty",
+		"Sec-Fetch-Mode":     "cors",
+		"Sec-Fetch-Site":     "same-origin",
 	} {
 		if got := gotHeaders.Get(name); got != want {
 			t.Errorf("%s = %q, 期望 %q", name, got, want)

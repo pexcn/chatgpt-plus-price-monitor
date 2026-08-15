@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -23,6 +24,7 @@ import (
 type config struct {
 	threshold float64
 	interval  time.Duration
+	jitter    time.Duration
 
 	sample        int
 	floorRatio    float64
@@ -71,13 +73,11 @@ func main() {
 		return
 	}
 
-	log.Printf("开始监控（每 %s 检查一次，最便宜的可信报价 <= %.2f 元时通知）",
-		cfg.interval, cfg.threshold)
+	log.Printf("开始监控（每 %s%s 检查一次，最便宜的可信报价 <= %.2f 元时通知）",
+		cfg.interval, jitterText(cfg.jitter), cfg.threshold)
 
 	// 状态只存在内存里，所以必须常驻运行才能去重。
 	var st state.State
-	ticker := time.NewTicker(cfg.interval)
-	defer ticker.Stop()
 	for {
 		next, err := check(ctx, fetch, notify, cfg, st)
 		if err != nil {
@@ -86,11 +86,16 @@ func main() {
 		}
 		st = next
 
+		wait := cfg.interval + randomJitter(cfg.jitter)
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			log.Print("收到退出信号，停止监控")
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }
@@ -114,7 +119,9 @@ func newFlagSet(cfg *config, errorHandling flag.ErrorHandling) *flag.FlagSet {
 	fs := flag.NewFlagSet("chatgpt-plus-price-monitor", errorHandling)
 
 	fs.Float64Var(&cfg.threshold, "threshold", 10, "最便宜的可信报价低于该价格（元）时通知")
-	fs.DurationVar(&cfg.interval, "interval", 30*time.Minute, "轮询间隔，0 表示只检查一次就退出")
+	intervalValue := intervalFlag{base: 3 * time.Minute, jitter: time.Minute, cfg: cfg}
+	cfg.interval, cfg.jitter = intervalValue.base, intervalValue.jitter
+	fs.Var(&intervalValue, "interval", "轮询间隔，格式为 基础间隔[:最大抖动]，0 表示只检查一次就退出")
 	fs.IntVar(&cfg.sample, "sample", 30, "取多少条报价作为参考价位的样本")
 	fs.Float64Var(&cfg.floorRatio, "floor-ratio", 0, "启用地板线过滤：低于\"参考价位×该比例\"的报价将被剔除")
 	fs.IntVar(&cfg.top, "top", 5, "通知里列出最便宜的 N 条")
@@ -126,13 +133,54 @@ func newFlagSet(cfg *config, errorHandling flag.ErrorHandling) *flag.FlagSet {
 
 	// 短选项和长选项共用同一个变量，这是 flag 包里做别名的常规写法。
 	fs.Float64Var(&cfg.threshold, "t", 10, "")
-	fs.DurationVar(&cfg.interval, "i", 30*time.Minute, "")
+	fs.Var(&intervalValue, "i", "")
 	fs.IntVar(&cfg.sample, "s", 30, "")
 	fs.IntVar(&cfg.top, "n", 5, "")
 	fs.BoolVar(&cfg.verbose, "v", false, "")
 
 	fs.Usage = func() { usage(fs) }
 	return fs
+}
+
+// intervalFlag 解析例如 3m:1m。没有冒号时抖动为 0。
+type intervalFlag struct {
+	base   time.Duration
+	jitter time.Duration
+	cfg    *config
+}
+
+func (f *intervalFlag) String() string {
+	if f.jitter == 0 {
+		return f.base.String()
+	}
+	return f.base.String() + ":" + f.jitter.String()
+}
+
+func (f *intervalFlag) Set(value string) error {
+	if value == "0" {
+		f.base, f.jitter = 0, 0
+		f.cfg.interval, f.cfg.jitter = 0, 0
+		return nil
+	}
+	parts := strings.Split(value, ":")
+	if len(parts) > 2 || len(parts) == 0 {
+		return fmt.Errorf("--interval 格式应为 基础间隔[:最大抖动]，例如 3m:1m")
+	}
+
+	base, err := time.ParseDuration(parts[0])
+	if err != nil {
+		return fmt.Errorf("--interval 基础间隔无效: %w", err)
+	}
+	jitter := time.Duration(0)
+	if len(parts) == 2 {
+		jitter, err = time.ParseDuration(parts[1])
+		if err != nil {
+			return fmt.Errorf("--interval 抖动无效: %w", err)
+		}
+	}
+	f.base, f.jitter = base, jitter
+	f.cfg.interval, f.cfg.jitter = base, jitter
+	return nil
 }
 
 func parseFlags(args []string) (*config, *flag.FlagSet) {
@@ -214,6 +262,10 @@ func (c *config) validate() error {
 		return fmt.Errorf("--threshold 必须大于 0")
 	case c.interval < 0:
 		return fmt.Errorf("--interval 不能为负数")
+	case c.jitter < 0:
+		return fmt.Errorf("--interval 抖动不能为负数")
+	case c.interval == 0 && c.jitter != 0:
+		return fmt.Errorf("--interval 为 0 时不能设置抖动")
 	case c.sample <= 0:
 		return fmt.Errorf("--sample 必须大于 0")
 	case c.floorRatioSet && (c.floorRatio <= 0 || c.floorRatio > 1):
@@ -224,6 +276,20 @@ func (c *config) validate() error {
 		return fmt.Errorf("--timeout 必须大于 0")
 	}
 	return nil
+}
+
+func randomJitter(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(max) + 1))
+}
+
+func jitterText(jitter time.Duration) string {
+	if jitter == 0 {
+		return ""
+	}
+	return "~" + jitter.String()
 }
 
 // fetcher 取最便宜的 n 条报价。抽成函数类型是为了让测试能替换掉真实接口。
