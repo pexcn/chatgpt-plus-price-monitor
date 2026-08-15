@@ -26,21 +26,20 @@ func (a Analysis) Best() (Offer, bool) {
 // 加购项、拼车之类挂在同一个商品下，价格只有正常报价的零头。
 // 用中位数而不是均值：均值本身就会被这些异常值拉偏。
 func Analyze(offers []Offer, floorRatio float64) Analysis {
-	sorted := make([]Offer, len(offers))
-	copy(sorted, offers)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Price < sorted[j].Price })
+	// offers 是单轮抓取结果，后续不再使用原顺序；原地排序可避免复制整批报价。
+	sort.Slice(offers, func(i, j int) bool { return offers[i].Price < offers[j].Price })
 
-	var a Analysis
-	a.Median = median(sorted)
-	a.Floor = a.Median * floorRatio
-	for _, o := range sorted {
-		if o.Price < a.Floor {
-			a.Dropped = append(a.Dropped, o)
-		} else {
-			a.Kept = append(a.Kept, o)
-		}
+	medianPrice := median(offers)
+	floor := medianPrice * floorRatio
+	firstKept := sort.Search(len(offers), func(i int) bool {
+		return offers[i].Price >= floor
+	})
+	return Analysis{
+		Median:  medianPrice,
+		Floor:   floor,
+		Dropped: offers[:firstKept],
+		Kept:    offers[firstKept:],
 	}
-	return a
 }
 
 // median 返回已按价格升序排列的报价的中位数。

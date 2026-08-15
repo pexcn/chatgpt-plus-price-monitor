@@ -2,6 +2,7 @@
 package priceai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -84,21 +85,21 @@ func Cheapest(ctx context.Context, c *http.Client, n int) ([]Offer, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
-	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("报价接口返回 HTTP %d", resp.StatusCode)
 	}
 
-	return parse(body, n)
+	return decode(io.LimitReader(resp.Body, 8<<20), n)
 }
 
 // parse 解析接口响应并做基本校验。
 func parse(body []byte, n int) ([]Offer, error) {
+	return decode(bytes.NewReader(body), n)
+}
+
+func decode(reader io.Reader, n int) ([]Offer, error) {
 	var r response
-	if err := json.Unmarshal(body, &r); err != nil {
+	if err := json.NewDecoder(reader).Decode(&r); err != nil {
 		return nil, fmt.Errorf("解析接口响应失败: %w", err)
 	}
 

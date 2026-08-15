@@ -29,7 +29,12 @@ func Run(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	httpc := &http.Client{Timeout: cfg.timeout}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 2
+	transport.MaxIdleConnsPerHost = 1
+	transport.IdleConnTimeout = cfg.interval + cfg.jitter + time.Minute
+	httpc := &http.Client{Timeout: cfg.timeout, Transport: transport}
+	defer transport.CloseIdleConnections()
 	fetch := func(ctx context.Context, n int) ([]priceai.Offer, error) {
 		return priceai.Cheapest(ctx, httpc, n)
 	}
