@@ -1,6 +1,6 @@
 FROM golang:1.26-alpine AS builder
 
-#COPY or ADD?
+COPY . .
 RUN apk add --no-cache --virtual .build-deps git make \
   && make \
   && make install \
