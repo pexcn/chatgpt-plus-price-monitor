@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -352,6 +354,95 @@ func TestValidate(t *testing.T) {
 	c.token, c.chatID, c.dryRun = "", "", true
 	if err := c.validate(); err != nil {
 		t.Errorf("dry-run 不该要求凭据: %v", err)
+	}
+}
+
+// 取值优先级：命令行 > 环境变量 > 默认值。
+func TestOrEnv(t *testing.T) {
+	const key = "TEST_ORENV_KEY"
+	t.Setenv(key, "from-env")
+	if got := orEnv("from-flag", key, "fallback"); got != "from-flag" {
+		t.Errorf("命令行应优先, 得到 %q", got)
+	}
+	if got := orEnv("", key, "fallback"); got != "from-env" {
+		t.Errorf("应回落到环境变量, 得到 %q", got)
+	}
+	t.Setenv(key, "")
+	if got := orEnv("", key, "fallback"); got != "fallback" {
+		t.Errorf("环境变量为空时应用默认值, 得到 %q", got)
+	}
+}
+
+// --help 不能把凭据打出来：环境变量里的 token 绝不能成为 flag 的默认值。
+func TestUsageDoesNotLeakCredentials(t *testing.T) {
+	const secret = "123456:SUPER-SECRET"
+	t.Setenv("TELEGRAM_BOT_TOKEN", secret)
+	t.Setenv("TELEGRAM_CHAT_ID", "99887766")
+
+	cfg, fs := parseFlags(nil)
+	var buf bytes.Buffer
+	fs.SetOutput(&buf)
+	fs.Usage()
+
+	for _, leaked := range []string{secret, "99887766"} {
+		if strings.Contains(buf.String(), leaked) {
+			t.Errorf("帮助信息泄露了凭据 %q:\n%s", leaked, buf.String())
+		}
+	}
+	// 泄露修掉了，但环境变量本身仍要生效。
+	if cfg.token != secret || cfg.chatID != "99887766" {
+		t.Errorf("环境变量没有生效: token=%q chatID=%q", cfg.token, cfg.chatID)
+	}
+}
+
+// 选项帮助必须以 -- 开头。
+func TestPrintOptionsUsesDoubleDash(t *testing.T) {
+	var buf bytes.Buffer
+	fs := newFlagSet(&config{}, flag.ContinueOnError)
+	printOptions(&buf, fs)
+
+	out := buf.String()
+	for _, name := range []string{"--top", "--threshold", "--dry-run", "--fail-threshold", "--telegram-token", "--notify-recover"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("帮助里缺少 %s:\n%s", name, out)
+		}
+	}
+	// 每个选项行都必须是双横线开头。
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "  -") && !strings.HasPrefix(line, "  --") {
+			t.Errorf("出现了单横线写法: %q", line)
+		}
+	}
+}
+
+// 双横线和单横线都要能解析（Go 的 flag 包两者等价），且命令行优先于环境变量。
+func TestParseFlagsAcceptsDoubleDash(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "envtok")
+	t.Setenv("TELEGRAM_CHAT_ID", "envchat")
+
+	cfg, _ := parseFlags([]string{"--top", "8", "--threshold", "12.5", "--dry-run", "--fail-threshold", "0"})
+	if cfg.top != 8 || cfg.threshold != 12.5 || !cfg.dryRun || cfg.failThreshold != 0 {
+		t.Errorf("双横线解析结果不对: %+v", cfg)
+	}
+	// 未指定时回落到环境变量。
+	if cfg.token != "envtok" || cfg.chatID != "envchat" {
+		t.Errorf("环境变量回落失败: token=%q chat=%q", cfg.token, cfg.chatID)
+	}
+	// 默认的 telegram-api。
+	if cfg.apiBase != "https://api.telegram.org" {
+		t.Errorf("apiBase = %q", cfg.apiBase)
+	}
+
+	// 命令行覆盖环境变量。
+	cfg2, _ := parseFlags([]string{"--telegram-token", "flagtok", "--telegram-chat", "flagchat"})
+	if cfg2.token != "flagtok" || cfg2.chatID != "flagchat" {
+		t.Errorf("命令行未能覆盖环境变量: token=%q chat=%q", cfg2.token, cfg2.chatID)
+	}
+
+	// 单横线同样可用。
+	cfg3, _ := parseFlags([]string{"-top", "3"})
+	if cfg3.top != 3 {
+		t.Errorf("单横线解析失败: top=%d", cfg3.top)
 	}
 }
 

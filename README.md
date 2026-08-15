@@ -16,7 +16,7 @@ go build -o chatgpt-plus-price-monitor .
 先看看现在什么价（不发通知、不写状态）：
 
 ```sh
-./chatgpt-plus-price-monitor -dry-run -verbose
+./chatgpt-plus-price-monitor --dry-run --verbose
 ```
 
 ```
@@ -26,7 +26,7 @@ go build -o chatgpt-plus-price-monitor .
   ...
 ```
 
-**先用它确认 `-threshold` 定在合理位置**，再配通知。
+**先用它确认 `--threshold` 定在合理位置**，再配通知。
 
 然后配置 Telegram：
 
@@ -38,26 +38,26 @@ go build -o chatgpt-plus-price-monitor .
 ```sh
 export TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
 export TELEGRAM_CHAT_ID=123456789
-./chatgpt-plus-price-monitor -interval 30m -top 5 -threshold 10
+./chatgpt-plus-price-monitor --interval 30m --top 5 --threshold 10
 ```
 
 ## 选项
 
 | 选项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `-top` | `5` | 取最便宜的 N 个报价计算均价 |
-| `-threshold` | `10` | 阈值（元），均价 ≤ 该值时通知 |
-| `-interval` | `0` | 轮询间隔（如 `30m`）；为 0 表示只检查一次就退出，交给 cron |
-| `-timeout` | `30s` | 单次 HTTP 请求超时 |
-| `-state` | `state.json` | 状态文件路径，用于通知去重 |
-| `-cooldown` | `24h` | 价格持续低于阈值时的重复提醒间隔；`0` = 只在跌破那一刻提醒一次 |
-| `-notify-recover` | `true` | 价格回升到阈值之上时也发一条 |
-| `-fail-threshold` | `3` | 连续抓取失败 N 次后发告警；`0` = 关闭 |
-| `-telegram-token` | `$TELEGRAM_BOT_TOKEN` | Bot Token |
-| `-telegram-chat` | `$TELEGRAM_CHAT_ID` | Chat ID |
-| `-telegram-api` | `https://api.telegram.org` | API 地址，国内直连不通时可指向自建 Bot API 或反代 |
-| `-dry-run` | `false` | 只抓取并打印，不发通知、不写状态 |
-| `-verbose` | `false` | 打印每条报价的店铺和标题 |
+| `--top` | `5` | 取最便宜的 N 个报价计算均价 |
+| `--threshold` | `10` | 阈值（元），均价 ≤ 该值时通知 |
+| `--interval` | `0` | 轮询间隔（如 `30m`）；为 0 表示只检查一次就退出，交给 cron |
+| `--timeout` | `30s` | 单次 HTTP 请求超时 |
+| `--state` | `state.json` | 状态文件路径，用于通知去重 |
+| `--cooldown` | `24h` | 价格持续低于阈值时的重复提醒间隔；`0` = 只在跌破那一刻提醒一次 |
+| `--notify-recover` | `true` | 价格回升到阈值之上时也发一条 |
+| `--fail-threshold` | `3` | 连续抓取失败 N 次后发告警；`0` = 关闭 |
+| `--telegram-token` | `$TELEGRAM_BOT_TOKEN` | Bot Token |
+| `--telegram-chat` | `$TELEGRAM_CHAT_ID` | Chat ID |
+| `--telegram-api` | `https://api.telegram.org` | API 地址，国内直连不通时可指向自建 Bot API 或反代 |
+| `--dry-run` | `false` | 只抓取并打印，不发通知、不写状态 |
+| `--verbose` | `false` | 打印每条报价的店铺和标题 |
 
 ## 数据来源
 
@@ -83,7 +83,7 @@ Bot Token 只能证明"你是这个 bot"，还得告诉它把消息发给谁。�
 所以只在**状态发生变化**时通知：
 
 - 均价从阈值之上跌到之下 → 发「降价提醒」
-- 持续低于阈值 → 静默，直到超过 `-cooldown`（默认 24 小时）才再提醒一次
+- 持续低于阈值 → 静默，直到超过 `--cooldown`（默认 24 小时）才再提醒一次
 - 均价回升到阈值之上 → 发「价格回升」，之后恢复静默
 
 删掉 `state.json` 就能重置状态。
@@ -92,7 +92,7 @@ Bot Token 只能证明"你是这个 bot"，还得告诉它把消息发给谁。�
 接口改版、被限流、网络不通，这些都会让抓取失败。挂了 cron 又不看日志的话，
 监控会静默死掉——你以为它在盯着，其实早就不工作了。
 
-所以连续失败 `-fail-threshold` 次（默认 3 次）之后会推一条告警，带上原始错误：
+所以连续失败 `--fail-threshold` 次（默认 3 次）之后会推一条告警，带上原始错误：
 
 ```
 ⚠️ 价格监控异常
@@ -112,7 +112,7 @@ Bot Token 只能证明"你是这个 bot"，还得告诉它把消息发给谁。�
 
 **接口返回条数不够时会直接报错。**
 如果接口改版或被限流只返回了 2 条，那这 2 条的均价并不是你想监控的东西，
-却很可能凑巧低于阈值而误报。所以条数少于 `-top` 时宁可报错退出（exit code 1）。
+却很可能凑巧低于阈值而误报。所以条数少于 `--top` 时宁可报错退出（exit code 1）。
 币种不是 CNY 也同理报错——阈值是按人民币比的。
 
 **关于 Telegram 在国内的连通性：**
@@ -122,7 +122,7 @@ Bot Token 只能证明"你是这个 bot"，还得告诉它把消息发给谁。�
 export HTTPS_PROXY=http://127.0.0.1:7890
 ```
 
-要么用 `-telegram-api` 指向你自己的反代或
+要么用 `--telegram-api` 指向你自己的反代或
 [自建 Bot API Server](https://github.com/tdlib/telegram-bot-api)。
 
 发消息用的是 `POST /bot<token>/sendMessage`，参数放在 JSON body 里而不是 URL query。
@@ -134,7 +134,7 @@ export HTTPS_PROXY=http://127.0.0.1:7890
 **crontab**（每 30 分钟，注意用绝对路径）：
 
 ```cron
-*/30 * * * * TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=yyy /opt/monitor/chatgpt-plus-price-monitor -state /opt/monitor/state.json >> /var/log/price-monitor.log 2>&1
+*/30 * * * * TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=yyy /opt/monitor/chatgpt-plus-price-monitor --state /opt/monitor/state.json >> /var/log/price-monitor.log 2>&1
 ```
 
 **systemd**（常驻，凭据放在 `/etc/price-monitor.env`，权限设成 600）：
@@ -147,7 +147,7 @@ After=network-online.target
 [Service]
 EnvironmentFile=/etc/price-monitor.env
 WorkingDirectory=/opt/monitor
-ExecStart=/opt/monitor/chatgpt-plus-price-monitor -interval 30m -top 5 -threshold 10
+ExecStart=/opt/monitor/chatgpt-plus-price-monitor --interval 30m --top 5 --threshold 10
 Restart=always
 RestartSec=60
 

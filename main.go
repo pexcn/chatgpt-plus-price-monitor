@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -41,11 +42,11 @@ type config struct {
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime)
-	cfg := parseFlags()
+	cfg, fs := parseFlags(os.Args[1:])
 
 	if err := cfg.validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "参数错误: %v\n\n", err)
-		flag.Usage()
+		fs.Usage()
 		os.Exit(2)
 	}
 
@@ -85,63 +86,106 @@ func main() {
 	}
 }
 
-func parseFlags() *config {
-	cfg := &config{}
-	flag.IntVar(&cfg.top, "top", 5, "取最便宜的 N 个报价计算均价")
-	flag.Float64Var(&cfg.threshold, "threshold", 10, "阈值（元），均价 <= 该值时通知")
+// newFlagSet 注册所有选项。用独立的 FlagSet 而不是全局的 flag.CommandLine，
+// 这样测试里能拿到和线上完全一致的选项集合。
+func newFlagSet(cfg *config, errorHandling flag.ErrorHandling) *flag.FlagSet {
+	fs := flag.NewFlagSet("chatgpt-plus-price-monitor", errorHandling)
 
-	flag.DurationVar(&cfg.interval, "interval", 0, "轮询间隔，如 30m；为 0 时只检查一次后退出（配合 cron 使用）")
-	flag.DurationVar(&cfg.timeout, "timeout", 30*time.Second, "单次 HTTP 请求超时")
+	fs.IntVar(&cfg.top, "top", 5, "取最便宜的 N 个报价计算均价")
+	fs.Float64Var(&cfg.threshold, "threshold", 10, "阈值（元），均价 <= 该值时通知")
 
-	flag.StringVar(&cfg.statePath, "state", "state.json", "状态文件路径，用于通知去重")
-	flag.DurationVar(&cfg.cooldown, "cooldown", 24*time.Hour, "价格持续低于阈值时的重复提醒间隔；为 0 表示只在跌破时提醒一次")
-	flag.BoolVar(&cfg.notifyRecover, "notify-recover", true, "价格回升到阈值之上时也发一条通知")
-	flag.IntVar(&cfg.failThreshold, "fail-threshold", 3, "连续抓取失败 N 次后发告警（避免监控静默失效）；0 表示关闭")
+	fs.DurationVar(&cfg.interval, "interval", 0, "轮询间隔，如 30m；为 0 时只检查一次后退出（配合 cron 使用）")
+	fs.DurationVar(&cfg.timeout, "timeout", 30*time.Second, "单次 HTTP 请求超时")
 
-	flag.StringVar(&cfg.token, "telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram Bot Token（建议改用环境变量 TELEGRAM_BOT_TOKEN）")
-	flag.StringVar(&cfg.chatID, "telegram-chat", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram Chat ID（可用环境变量 TELEGRAM_CHAT_ID）")
-	flag.StringVar(&cfg.apiBase, "telegram-api", envOr("TELEGRAM_API_BASE", "https://api.telegram.org"), "Telegram API 地址；国内直连不通时可指向自建 Bot API 或反代")
+	fs.StringVar(&cfg.statePath, "state", "state.json", "状态文件路径，用于通知去重")
+	fs.DurationVar(&cfg.cooldown, "cooldown", 24*time.Hour, "价格持续低于阈值时的重复提醒间隔；为 0 表示只在跌破时提醒一次")
+	fs.BoolVar(&cfg.notifyRecover, "notify-recover", true, "价格回升到阈值之上时也发一条通知")
+	fs.IntVar(&cfg.failThreshold, "fail-threshold", 3, "连续抓取失败 N 次后发告警（避免监控静默失效）；0 表示关闭")
 
-	flag.BoolVar(&cfg.dryRun, "dry-run", false, "只抓取并打印结果，不发送通知、不写状态文件")
-	flag.BoolVar(&cfg.verbose, "verbose", false, "打印每条报价的店铺和标题")
+	// 凭据的默认值留空，解析后再回落到环境变量。
+	// 直接把 os.Getenv 当默认值会让 --help 把 token 原样打出来。
+	fs.StringVar(&cfg.token, "telegram-token", "", "Telegram Bot Token（建议改用环境变量 TELEGRAM_BOT_TOKEN）")
+	fs.StringVar(&cfg.chatID, "telegram-chat", "", "Telegram Chat ID（可用环境变量 TELEGRAM_CHAT_ID）")
+	fs.StringVar(&cfg.apiBase, "telegram-api", "", "Telegram API 地址，默认 https://api.telegram.org；国内直连不通时可指向自建 Bot API 或反代（环境变量 TELEGRAM_API_BASE）")
 
-	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "监控 ChatGPT Plus 代充价格，低于阈值时 Telegram 通知。\n\n用法:\n  %s [options]\n\n选项:\n", os.Args[0])
-		flag.PrintDefaults()
-		fmt.Fprint(flag.CommandLine.Output(), `
-示例:
-  # 先看看现在什么价（不发通知）
-  chatgpt-plus-price-monitor -dry-run -verbose
+	fs.BoolVar(&cfg.dryRun, "dry-run", false, "只抓取并打印结果，不发送通知、不写状态文件")
+	fs.BoolVar(&cfg.verbose, "verbose", false, "打印每条报价的店铺和标题")
 
-  # 常驻运行，每 30 分钟检查一次
-  export TELEGRAM_BOT_TOKEN=123456:ABC...
-  export TELEGRAM_CHAT_ID=123456789
-  chatgpt-plus-price-monitor -interval 30m -top 5 -threshold 10
-`)
-	}
-	flag.Parse()
-	return cfg
+	fs.Usage = func() { usage(fs) }
+	return fs
 }
 
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
+func parseFlags(args []string) (*config, *flag.FlagSet) {
+	cfg := &config{}
+	fs := newFlagSet(cfg, flag.ExitOnError)
+	_ = fs.Parse(args)
+
+	// 命令行没给就用环境变量。
+	cfg.token = orEnv(cfg.token, "TELEGRAM_BOT_TOKEN", "")
+	cfg.chatID = orEnv(cfg.chatID, "TELEGRAM_CHAT_ID", "")
+	cfg.apiBase = orEnv(cfg.apiBase, "TELEGRAM_API_BASE", "https://api.telegram.org")
+	return cfg, fs
+}
+
+// orEnv 按 命令行 > 环境变量 > 默认值 的优先级取值。
+func orEnv(fromFlag, envKey, def string) string {
+	if fromFlag != "" {
+		return fromFlag
+	}
+	if v := os.Getenv(envKey); v != "" {
 		return v
 	}
 	return def
 }
 
+func usage(fs *flag.FlagSet) {
+	out := fs.Output()
+	fmt.Fprintf(out, "监控 ChatGPT Plus 代充价格，低于阈值时 Telegram 通知。\n\n用法:\n  %s [options]\n\n选项:\n", os.Args[0])
+	printOptions(out, fs)
+	fmt.Fprint(out, `
+示例:
+  # 先看看现在什么价（不发通知）
+  chatgpt-plus-price-monitor --dry-run --verbose
+
+  # 常驻运行，每 30 分钟检查一次
+  export TELEGRAM_BOT_TOKEN=123456:ABC...
+  export TELEGRAM_CHAT_ID=123456789
+  chatgpt-plus-price-monitor --interval 30m --top 5 --threshold 10
+`)
+}
+
+// printOptions 用 --name 的风格打印选项。
+//
+// 标准库的 flag.PrintDefaults 只会打印单横线，而 Go 的 flag 包本身
+// 单双横线都接受，所以这里只是把帮助信息统一成双横线的写法。
+func printOptions(out io.Writer, fs *flag.FlagSet) {
+	fs.VisitAll(func(f *flag.Flag) {
+		typeName, help := flag.UnquoteUsage(f)
+		head := "  --" + f.Name
+		if typeName != "" {
+			head += " " + typeName
+		}
+		fmt.Fprintf(out, "%s\n    \t%s", head, help)
+		// 布尔开关默认关闭时没必要写出来，噪音。
+		if f.DefValue != "" && f.DefValue != "false" {
+			fmt.Fprintf(out, "（默认 %s）", f.DefValue)
+		}
+		fmt.Fprintln(out)
+	})
+}
+
 func (c *config) validate() error {
 	if c.top <= 0 {
-		return fmt.Errorf("-top 必须大于 0")
+		return fmt.Errorf("--top 必须大于 0")
 	}
 	if c.threshold <= 0 {
-		return fmt.Errorf("-threshold 必须大于 0")
+		return fmt.Errorf("--threshold 必须大于 0")
 	}
 	if c.timeout <= 0 {
-		return fmt.Errorf("-timeout 必须大于 0")
+		return fmt.Errorf("--timeout 必须大于 0")
 	}
 	if !c.dryRun && (c.token == "" || c.chatID == "") {
-		return fmt.Errorf("需要 Telegram 凭据：设置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 环境变量，或用 -telegram-token / -telegram-chat；也可以加 -dry-run 先只看结果")
+		return fmt.Errorf("需要 Telegram 凭据：设置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 环境变量，或用 --telegram-token / --telegram-chat；也可以加 --dry-run 先只看结果")
 	}
 	return nil
 }
