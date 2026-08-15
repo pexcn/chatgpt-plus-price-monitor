@@ -73,8 +73,8 @@ func main() {
 		return
 	}
 
-	log.Printf("开始监控（每 %s%s 检查一次，最便宜的可信报价 <= %.2f 元时通知）",
-		cfg.interval, jitterText(cfg.jitter), cfg.threshold)
+	log.Printf("开始监控（每 %s 检查一次，最便宜的可信报价 <= %.2f 元时通知）",
+		intervalText(cfg.interval, cfg.jitter), cfg.threshold)
 
 	// 状态只存在内存里，所以必须常驻运行才能去重。
 	var st state.State
@@ -151,9 +151,9 @@ type intervalFlag struct {
 
 func (f *intervalFlag) String() string {
 	if f.jitter == 0 {
-		return f.base.String()
+		return shortDuration(f.base)
 	}
-	return f.base.String() + ":" + f.jitter.String()
+	return shortDuration(f.base) + ":" + shortDuration(f.jitter)
 }
 
 func (f *intervalFlag) Set(value string) error {
@@ -285,11 +285,24 @@ func randomJitter(max time.Duration) time.Duration {
 	return time.Duration(rand.Int63n(int64(max) + 1))
 }
 
-func jitterText(jitter time.Duration) string {
+func intervalText(interval, jitter time.Duration) string {
 	if jitter == 0 {
-		return ""
+		return interval.String()
 	}
-	return "~" + jitter.String()
+	return interval.String() + "~" + (interval + jitter).String()
+}
+
+func shortDuration(d time.Duration) string {
+	if d == 0 {
+		return "0"
+	}
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", d/time.Minute)
+	}
+	if d%time.Second == 0 {
+		return fmt.Sprintf("%ds", d/time.Second)
+	}
+	return d.String()
 }
 
 // fetcher 取最便宜的 n 条报价。抽成函数类型是为了让测试能替换掉真实接口。
