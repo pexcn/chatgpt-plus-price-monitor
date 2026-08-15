@@ -1,8 +1,6 @@
 package state
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -82,45 +80,5 @@ func TestDecideNoRepeatAlert(t *testing.T) {
 	prev = State{Below: true, LastNotify: now}
 	if got := prev.Decide(true, now.Add(time.Minute), 24*time.Hour, true); got != Silent {
 		t.Errorf("第二次 = %v, 期望 Silent", got)
-	}
-}
-
-func TestLoadSaveRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sub", "state.json")
-
-	// 文件不存在时应返回零值而不是报错。
-	s, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load 不存在的文件报错: %v", err)
-	}
-	if s.Below {
-		t.Error("零值状态的 Below 应为 false")
-	}
-
-	want := State{Below: true, LastNotify: time.Now().UTC().Truncate(time.Second), LastAvg: 9.62}
-	if err := Save(path, want); err != nil {
-		t.Fatalf("Save 失败: %v", err)
-	}
-	got, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load 失败: %v", err)
-	}
-	if got.Below != want.Below || !got.LastNotify.Equal(want.LastNotify) || got.LastAvg != want.LastAvg {
-		t.Errorf("往返后 = %+v, 期望 %+v", got, want)
-	}
-}
-
-func TestLoadCorruptedFileResets(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	if err := os.WriteFile(path, []byte("{ 这不是 json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// 状态文件损坏不应让监控停摆。
-	s, err := Load(path)
-	if err != nil {
-		t.Fatalf("损坏的状态文件不应报错: %v", err)
-	}
-	if s.Below {
-		t.Error("损坏后应回到零值状态")
 	}
 }

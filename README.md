@@ -14,7 +14,7 @@ go build -o chatgpt-plus-price-monitor .
 先看看现在什么价。**不设环境变量时只打印日志，不发通知**：
 
 ```sh
-./chatgpt-plus-price-monitor --verbose
+./chatgpt-plus-price-monitor --once -v
 ```
 
 ```
@@ -35,7 +35,7 @@ go build -o chatgpt-plus-price-monitor .
 ```sh
 export TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
 export TELEGRAM_CHAT_ID=123456789
-./chatgpt-plus-price-monitor --interval 30m --top 5 --threshold 10
+./chatgpt-plus-price-monitor -i 30m -n 5 -t 10
 ```
 
 凭据只从环境变量读，没做成命令行选项：写在命令行上同机器的其他人 `ps` 就能看到。
@@ -44,16 +44,15 @@ export TELEGRAM_CHAT_ID=123456789
 
 | 选项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--top` | `5` | 取最便宜的 N 个报价计算均价 |
-| `--threshold` | `10` | 阈值（元），均价 ≤ 该值时通知 |
-| `--interval` | `0` | 轮询间隔（如 `30m`）；为 0 表示只检查一次就退出，交给 cron |
+| `-n, --top` | `5` | 取最便宜的 N 个报价计算均价 |
+| `-t, --threshold` | `10` | 均价低于该价格（元）时通知 |
+| `-i, --interval` | `30m` | 轮询间隔 |
+| `--once` | | 只检查一次就退出 |
+| `--cooldown` | `24h` | 持续低于阈值时的重复提醒间隔，`0` 表示只提醒一次 |
+| `--no-rebound` | | 价格回升到阈值之上时不通知 |
+| `--fail-threshold` | `3` | 连续抓取失败 N 次后告警，`0` 表示关闭 |
 | `--timeout` | `30s` | 单次 HTTP 请求超时 |
-| `--state` | `state.json` | 状态文件路径，用于通知去重 |
-| `--cooldown` | `24h` | 价格持续低于阈值时的重复提醒间隔；`0` = 只在跌破那一刻提醒一次 |
-| `--notify-rebound` | `true` | 价格回升到阈值之上时也发一条 |
-| `--fail-threshold` | `3` | 连续抓取失败 N 次后发告警；`0` = 关闭 |
-| `--dry-run` | `false` | 即使配了环境变量也不发通知、不写状态 |
-| `--verbose` | `false` | 打印每条报价的店铺和标题 |
+| `-v, --verbose` | | 打印每条报价的店铺和标题 |
 
 ## 数据来源
 
@@ -83,14 +82,9 @@ GET https://priceai.cc/api/products/chatgpt-plus/offers?limit=<top>&offset=0
 - 抓取恢复 → 「监控已恢复」
 
 抓取失败告警是为了防止监控静默死掉：接口改版、被限流、网络不通都会让抓取失败，
-挂了 cron 又不看日志的话，你以为它在盯着，其实早就不工作了。
+日志没人看的话，你以为它在盯着，其实早就不工作了。
 一轮故障只告警一次；如果告警本身也发不出去，不会记成"已告警"，下一轮会重试。
 
-## state.json
-
-存的就是上面那些判断所需的历史：是否已低于阈值、上次通知时间、连续失败次数。
-删掉它就能重置状态。
-
-去掉它的话，价格只要在阈值下待着，每轮检查都会推一条 —— 半小时一次，很快就会被静音。
-常驻模式（`--interval`）可以把状态放内存里，但 cron 单次模式每轮都是新进程，
-不落盘就完全没法去重，所以还是需要这个文件。
+去重状态只存在内存里，所以要常驻运行才有意义。重启会重新武装：
+如果重启时价格仍低于阈值，会再收到一条降价提醒。
+`--once` 每次都是全新状态，适合手动看一眼当前价格，不适合挂 cron。
