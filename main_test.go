@@ -458,6 +458,11 @@ func TestFloorRatioIsOptIn(t *testing.T) {
 	if !enabled.floorRatioSet || enabled.floorRatio != 0.1 {
 		t.Errorf("显式指定后应启用异常低价过滤: %+v", enabled)
 	}
+
+	short, _ := parseFlags([]string{"-f", "0.1"})
+	if !short.floorRatioSet || short.floorRatio != 0.1 {
+		t.Errorf("使用 -f 后应启用异常低价过滤: %+v", short)
+	}
 }
 
 // 帮助里的选项顺序必须与 options 一致，且不能漏掉任何已注册的选项。

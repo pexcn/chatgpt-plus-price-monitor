@@ -106,7 +106,7 @@ var options = []struct{ short, long string }{
 	{"t", "threshold"},
 	{"i", "interval"},
 	{"s", "sample"},
-	{"", "floor-ratio"},
+	{"f", "floor-ratio"},
 	{"n", "top"},
 	{"", "cooldown"},
 	{"", "no-rebound"},
@@ -135,6 +135,7 @@ func newFlagSet(cfg *config, errorHandling flag.ErrorHandling) *flag.FlagSet {
 	fs.Float64Var(&cfg.threshold, "t", 10, "")
 	fs.Var(&intervalValue, "i", "")
 	fs.IntVar(&cfg.sample, "s", 30, "")
+	fs.Float64Var(&cfg.floorRatio, "f", 0, "")
 	fs.IntVar(&cfg.top, "n", 5, "")
 	fs.BoolVar(&cfg.verbose, "v", false, "")
 
@@ -188,7 +189,7 @@ func parseFlags(args []string) (*config, *flag.FlagSet) {
 	fs := newFlagSet(cfg, flag.ExitOnError)
 	_ = fs.Parse(args)
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "floor-ratio" {
+		if f.Name == "floor-ratio" || f.Name == "f" {
 			cfg.floorRatioSet = true
 		}
 	})
