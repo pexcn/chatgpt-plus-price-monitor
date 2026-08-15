@@ -1,7 +1,9 @@
 # chatgpt-plus-price-monitor
 
-监控 [priceai.cc](https://priceai.cc/products/chatgpt-plus) 上 ChatGPT Plus 的挂单价格，
-当**前 N 个的均价**低于阈值时通过 Telegram 通知。
+监控 [priceai.cc](https://priceai.cc/products/chatgpt-plus) 上 ChatGPT Plus 的报价，
+当**最便宜的 N 个的均价**低于阈值时通过 Telegram 通知。
+
+**零第三方依赖**，只用 Go 标准库。
 
 ## 编译
 
@@ -9,28 +11,24 @@
 go build -o chatgpt-plus-price-monitor .
 ```
 
-需要 Go 1.23+，只依赖 `goquery` 一个第三方库。
-
 ## 快速开始
 
-**第一步，先确认能正确抓到价格**（不发通知，不写状态）：
+先看看现在什么价（不发通知、不写状态）：
 
 ```sh
 ./chatgpt-plus-price-monitor -dry-run -verbose
 ```
 
-输出类似：
-
 ```
-提取方式=embedded-json 共 24 个价格: 8.80, 9.00, 9.50, 10.00, 11.20, ...
-前 5 个均价 9.70 元（最低 8.80 / 最高 11.20），阈值 10.00 -> 已达成
+最便宜的 5 个均价 104.75 元（最低 100.94 / 最高 108.15），阈值 10.00 -> 未达成
+  1. 100.94 元 | Ai小卖部 | 【自营】gpt plus （upi） 未接码 | 质保一个月...
+  2. 101.97 元 | Ai俱乐部 | GPT plus （8.10号菲区正价开通的Gmail成品号）
+  ...
 ```
 
-核对这几个数字和网页上看到的是否一致。**一致了再配通知**，否则容易收到假警报。
+**先用它确认 `-threshold` 定在合理位置**，再配通知。
 
-如果抓不到或者对不上，见下面的「抓不到价格怎么办」。
-
-**第二步，配置 Telegram：**
+然后配置 Telegram：
 
 1. 找 [@BotFather](https://t.me/BotFather) 发 `/newbot`，拿到形如 `123456:ABC-DEF...` 的 token；
 2. 给你的 bot 发一条消息，然后访问
@@ -47,11 +45,8 @@ export TELEGRAM_CHAT_ID=123456789
 
 | 选项 | 默认值 | 说明 |
 | --- | --- | --- |
-| `-url` | priceai.cc 的商品页 | 监控的页面地址 |
-| `-top` | `5` | 取前 N 个价格计算均价 |
+| `-top` | `5` | 取最便宜的 N 个报价计算均价 |
 | `-threshold` | `10` | 阈值（元），均价 ≤ 该值时通知 |
-| `-sort` | `false` | 先按价格升序再取前 N（即"最便宜的 N 个"），默认按页面顺序 |
-| `-selector` | 自动识别 | 价格元素的 CSS 选择器 |
 | `-interval` | `0` | 轮询间隔（如 `30m`）；为 0 表示只检查一次就退出，交给 cron |
 | `-timeout` | `30s` | 单次 HTTP 请求超时 |
 | `-state` | `state.json` | 状态文件路径，用于通知去重 |
@@ -61,8 +56,21 @@ export TELEGRAM_CHAT_ID=123456789
 | `-telegram-chat` | `$TELEGRAM_CHAT_ID` | Chat ID |
 | `-telegram-api` | `https://api.telegram.org` | API 地址，国内直连不通时可指向自建 Bot API 或反代 |
 | `-dry-run` | `false` | 只抓取并打印，不发通知、不写状态 |
-| `-dump` | | 把抓到的原始 HTML 存到文件，用于调试选择器 |
-| `-verbose` | `false` | 打印完整价格列表和提取方式 |
+| `-verbose` | `false` | 打印每条报价的店铺和标题 |
+
+## 数据来源
+
+直接调页面背后的接口，不解析 HTML：
+
+```
+GET https://priceai.cc/api/products/chatgpt-plus/offers?limit=<top>&offset=0
+```
+
+这个接口**默认按价格升序返回**，所以 `offset=0&limit=N` 拿到的就是最便宜的 N 条，
+也正是页面上显示的前 N 条，本地不需要再排序。
+
+每条报价里用到了 `price`、`currency`、`sourceStoreName`、`sourceTitle`、`url`，
+通知里会把价格做成可点的链接，收到就能直接跳去下单。
 
 ## 几个设计上的说明
 
@@ -79,17 +87,13 @@ Bot Token 只能证明"你是这个 bot"，还得告诉它把消息发给谁。�
 
 删掉 `state.json` 就能重置状态。
 
-**为什么抓到的价格数量不够会直接报错？**
-如果页面改版导致只抓到 2 个价格，那这 2 个的均价并不是你想监控的东西，
-却很可能凑巧低于阈值而误报。所以样本数少于 `-top` 时宁可报错退出（exit code 1），
-也不发一条假的降价通知。
-
-**`-sort` 要不要开？**
-默认按页面顺序取前 N，对应你在网页上看到的前几行。如果页面本身不是按价格排序的，
-或者你真正想要的是"最便宜的 N 个"，加上 `-sort`。
+**接口返回条数不够时会直接报错。**
+如果接口改版或被限流只返回了 2 条，那这 2 条的均价并不是你想监控的东西，
+却很可能凑巧低于阈值而误报。所以条数少于 `-top` 时宁可报错退出（exit code 1）。
+币种不是 CNY 也同理报错——阈值是按人民币比的。
 
 **关于 Telegram 在国内的连通性：**
-`api.telegram.org` 在中国大陆无法直连。要么让程序走代理：
+`api.telegram.org` 在中国大陆无法直连。要么让程序走代理（Go 会自动读取环境变量）：
 
 ```sh
 export HTTPS_PROXY=http://127.0.0.1:7890
@@ -98,23 +102,9 @@ export HTTPS_PROXY=http://127.0.0.1:7890
 要么用 `-telegram-api` 指向你自己的反代或
 [自建 Bot API Server](https://github.com/tdlib/telegram-bot-api)。
 
-## 抓不到价格怎么办
-
-程序按 `-selector` → 页面内嵌 JSON（`__NEXT_DATA__` 等）→ 正文正则 的顺序尝试提取，
-`-verbose` 会打印实际用的是哪一种。都失败时先把页面存下来：
-
-```sh
-./chatgpt-plus-price-monitor -dry-run -dump page.html
-```
-
-然后看 `page.html`：
-
-- **里面有价格数字** → 用浏览器 F12 找到价格元素的 class，用 `-selector` 指定，例如
-  `-selector '.price'`、`-selector 'td:nth-child(2)'`。这是最稳的方式。
-- **里面只有个空壳 `<div id="app">`** → 页面是前端渲染的，纯 HTTP 请求拿不到数据。
-  这时候翻一下浏览器 F12 的 Network 面板，多半能找到一个返回 JSON 的接口，
-  直接把 `-url` 指向那个接口即可（程序也能从 JSON 响应里提价格）。
-  实在不行才需要上无头浏览器。
+发消息用的是 `POST /bot<token>/sendMessage`，参数放在 JSON body 里而不是 URL query。
+两种都能用，但 POST 更好：消息正文不进 URL，省掉中文和 emoji 的转义问题，
+也不会让 token 和正文出现在中间代理的访问日志里。
 
 ## 定时运行
 
@@ -148,5 +138,6 @@ WantedBy=multi-user.target
 go test ./...
 ```
 
-覆盖了三种提取策略（选择器 / 内嵌 JSON / 正文正则）、取前 N 与排序、
-通知去重的状态机，以及 Telegram 客户端的成功与失败分支。
+接口解析用的是真实抓取的响应（`internal/priceai/testdata/offers.json`）。
+另外覆盖了通知去重的状态机、`checkOnce` 的完整通知链路（对着假的 Telegram 服务器），
+以及 Telegram 客户端的成功与失败分支。

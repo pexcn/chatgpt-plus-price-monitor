@@ -1,5 +1,5 @@
-// Command chatgpt-plus-price-monitor 监控 priceai.cc 上 ChatGPT Plus 的挂单价格，
-// 当前 N 个的均价低于阈值时通过 Telegram 通知。
+// Command chatgpt-plus-price-monitor 监控 priceai.cc 上 ChatGPT Plus 的报价，
+// 最便宜的 N 个的均价低于阈值时通过 Telegram 通知。
 package main
 
 import (
@@ -10,25 +10,18 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/pexcn/chatgpt-plus-price-monitor/internal/scraper"
+	"github.com/pexcn/chatgpt-plus-price-monitor/internal/priceai"
 	"github.com/pexcn/chatgpt-plus-price-monitor/internal/state"
 	"github.com/pexcn/chatgpt-plus-price-monitor/internal/telegram"
 )
 
-const defaultURL = "https://priceai.cc/products/chatgpt-plus"
-
 type config struct {
-	url       string
 	top       int
 	threshold float64
-	selector  string
-	sortAsc   bool
-	userAgent string
 
 	interval time.Duration
 	timeout  time.Duration
@@ -41,9 +34,8 @@ type config struct {
 	chatID  string
 	apiBase string
 
-	dryRun   bool
-	dumpPath string
-	verbose  bool
+	dryRun  bool
+	verbose bool
 }
 
 func main() {
@@ -60,23 +52,26 @@ func main() {
 	defer stop()
 
 	httpc := &http.Client{Timeout: cfg.timeout}
+	fetch := func(ctx context.Context, n int) ([]priceai.Offer, error) {
+		return priceai.Cheapest(ctx, httpc, n)
+	}
 
 	// interval 为 0 时跑一次就退出，交给 cron / systemd timer 调度。
 	if cfg.interval <= 0 {
-		if err := checkOnce(ctx, httpc, cfg); err != nil {
+		if err := checkOnce(ctx, fetch, httpc, cfg); err != nil {
 			log.Printf("检查失败: %v", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	log.Printf("开始监控 %s（每 %s 检查一次，前 %d 个均价 <= %.2f 时通知）",
-		cfg.url, cfg.interval, cfg.top, cfg.threshold)
+	log.Printf("开始监控（每 %s 检查一次，最便宜的 %d 个均价 <= %.2f 元时通知）",
+		cfg.interval, cfg.top, cfg.threshold)
 
 	ticker := time.NewTicker(cfg.interval)
 	defer ticker.Stop()
 	for {
-		if err := checkOnce(ctx, httpc, cfg); err != nil {
+		if err := checkOnce(ctx, fetch, httpc, cfg); err != nil {
 			// 常驻模式下单次失败不退出，等下一轮重试。
 			log.Printf("检查失败: %v", err)
 		}
@@ -91,12 +86,8 @@ func main() {
 
 func parseFlags() *config {
 	cfg := &config{}
-	flag.StringVar(&cfg.url, "url", defaultURL, "监控的页面地址")
-	flag.IntVar(&cfg.top, "top", 5, "取前 N 个价格计算均价")
+	flag.IntVar(&cfg.top, "top", 5, "取最便宜的 N 个报价计算均价")
 	flag.Float64Var(&cfg.threshold, "threshold", 10, "阈值（元），均价 <= 该值时通知")
-	flag.StringVar(&cfg.selector, "selector", "", "价格元素的 CSS 选择器；留空则自动识别")
-	flag.BoolVar(&cfg.sortAsc, "sort", false, "先按价格升序再取前 N（即最便宜的 N 个），默认按页面顺序")
-	flag.StringVar(&cfg.userAgent, "user-agent", "", "自定义 User-Agent")
 
 	flag.DurationVar(&cfg.interval, "interval", 0, "轮询间隔，如 30m；为 0 时只检查一次后退出（配合 cron 使用）")
 	flag.DurationVar(&cfg.timeout, "timeout", 30*time.Second, "单次 HTTP 请求超时")
@@ -110,19 +101,15 @@ func parseFlags() *config {
 	flag.StringVar(&cfg.apiBase, "telegram-api", envOr("TELEGRAM_API_BASE", "https://api.telegram.org"), "Telegram API 地址；国内直连不通时可指向自建 Bot API 或反代")
 
 	flag.BoolVar(&cfg.dryRun, "dry-run", false, "只抓取并打印结果，不发送通知、不写状态文件")
-	flag.StringVar(&cfg.dumpPath, "dump", "", "把抓到的原始 HTML 存到指定文件，用于调试选择器")
-	flag.BoolVar(&cfg.verbose, "verbose", false, "输出每次抓到的完整价格列表")
+	flag.BoolVar(&cfg.verbose, "verbose", false, "打印每条报价的店铺和标题")
 
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "监控 ChatGPT Plus 代充价格，低于阈值时 Telegram 通知。\n\n用法:\n  %s [options]\n\n选项:\n", os.Args[0])
 		flag.PrintDefaults()
 		fmt.Fprint(flag.CommandLine.Output(), `
 示例:
-  # 先确认能正确抓到价格（不发通知）
+  # 先看看现在什么价（不发通知）
   chatgpt-plus-price-monitor -dry-run -verbose
-
-  # 抓不到时保存页面，人工确认选择器
-  chatgpt-plus-price-monitor -dry-run -dump page.html
 
   # 常驻运行，每 30 分钟检查一次
   export TELEGRAM_BOT_TOKEN=123456:ABC...
@@ -151,44 +138,34 @@ func (c *config) validate() error {
 	if c.timeout <= 0 {
 		return fmt.Errorf("-timeout 必须大于 0")
 	}
-	if !strings.HasPrefix(c.url, "http://") && !strings.HasPrefix(c.url, "https://") {
-		return fmt.Errorf("-url 必须以 http:// 或 https:// 开头")
-	}
 	if !c.dryRun && (c.token == "" || c.chatID == "") {
 		return fmt.Errorf("需要 Telegram 凭据：设置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 环境变量，或用 -telegram-token / -telegram-chat；也可以加 -dry-run 先只看结果")
 	}
 	return nil
 }
 
-func checkOnce(ctx context.Context, httpc *http.Client, cfg *config) error {
-	res, err := scraper.Fetch(ctx, httpc, scraper.Options{
-		URL:       cfg.url,
-		Selector:  cfg.selector,
-		UserAgent: cfg.userAgent,
-		DumpPath:  cfg.dumpPath,
-	})
+// fetcher 取最便宜的 n 条报价。抽成函数类型是为了让测试能替换掉真实接口。
+type fetcher func(ctx context.Context, n int) ([]priceai.Offer, error)
+
+func checkOnce(ctx context.Context, fetch fetcher, httpc *http.Client, cfg *config) error {
+	offers, err := fetch(ctx, cfg.top)
 	if err != nil {
 		return err
 	}
-	if cfg.verbose {
-		log.Printf("提取方式=%s 共 %d 个价格: %s", res.Method, len(res.Prices), formatPrices(res.Prices))
-	}
-	// 样本不足说明页面结构可能变了，此时算出的均价不可信，
-	// 宁可报错也不要误报一条"降价了"。
-	if len(res.Prices) < cfg.top {
-		return fmt.Errorf("只抓到 %d 个价格，少于 -top %d（提取方式=%s）；页面结构可能已变化，可用 -dump 保存页面后用 -selector 指定",
-			len(res.Prices), cfg.top, res.Method)
-	}
-
-	top := scraper.TopN(res.Prices, cfg.top, cfg.sortAsc)
-	st := scraper.Summarize(top)
+	st := priceai.Summarize(offers)
 	below := st.Avg <= cfg.threshold
 
-	log.Printf("前 %d 个均价 %.2f 元（最低 %.2f / 最高 %.2f），阈值 %.2f -> %s",
-		cfg.top, st.Avg, st.Min, st.Max, cfg.threshold, map[bool]string{true: "已达成", false: "未达成"}[below])
+	log.Printf("最便宜的 %d 个均价 %.2f 元（最低 %.2f / 最高 %.2f），阈值 %.2f -> %s",
+		cfg.top, st.Avg, st.Min, st.Max, cfg.threshold,
+		map[bool]string{true: "已达成", false: "未达成"}[below])
+	if cfg.verbose {
+		for i, o := range offers {
+			log.Printf("  %d. %.2f 元 | %s | %s", i+1, o.Price, o.Store(), o.SourceTitle)
+		}
+	}
 
 	if cfg.dryRun {
-		log.Printf("dry-run：跳过通知，明细 %s", formatPrices(top))
+		log.Print("dry-run：跳过通知")
 		return nil
 	}
 
@@ -204,8 +181,7 @@ func checkOnce(ctx context.Context, httpc *http.Client, cfg *config) error {
 	}
 
 	tg := &telegram.Client{Token: cfg.token, ChatID: cfg.chatID, HTTP: httpc, BaseURL: cfg.apiBase}
-	msg := buildMessage(action, cfg, top, st, prev.LastAvg)
-	if err := tg.Send(ctx, msg); err != nil {
+	if err := tg.Send(ctx, buildMessage(action, cfg, offers, st, prev.LastAvg)); err != nil {
 		return err
 	}
 	log.Printf("已发送 Telegram 通知 (%s)", action)
@@ -213,7 +189,7 @@ func checkOnce(ctx context.Context, httpc *http.Client, cfg *config) error {
 	return state.Save(cfg.statePath, state.State{Below: below, LastNotify: now, LastAvg: st.Avg})
 }
 
-func buildMessage(action state.Action, cfg *config, top []float64, st scraper.Stats, prevAvg float64) string {
+func buildMessage(action state.Action, cfg *config, offers []priceai.Offer, st priceai.Stats, prevAvg float64) string {
 	var b strings.Builder
 	switch action {
 	case state.AlertBelow:
@@ -224,24 +200,31 @@ func buildMessage(action state.Action, cfg *config, top []float64, st scraper.St
 		b.WriteString("🔺 <b>ChatGPT Plus 价格回升</b>\n\n")
 	}
 
-	order := "页面顺序"
-	if cfg.sortAsc {
-		order = "价格升序"
-	}
-	fmt.Fprintf(&b, "前 %d 个均价：<b>%.2f</b> 元（阈值 %.2f，%s）\n", cfg.top, st.Avg, cfg.threshold, order)
+	fmt.Fprintf(&b, "最便宜的 %d 个均价：<b>%.2f</b> 元（阈值 %.2f）\n", cfg.top, st.Avg, cfg.threshold)
 	fmt.Fprintf(&b, "最低 %.2f / 最高 %.2f\n", st.Min, st.Max)
-	fmt.Fprintf(&b, "明细：%s\n", telegram.Escape(formatPrices(top)))
 	if action == state.AlertRecover && prevAvg > 0 {
 		fmt.Fprintf(&b, "上次通知时为 %.2f 元\n", prevAvg)
 	}
-	fmt.Fprintf(&b, "\n%s", telegram.Escape(cfg.url))
+
+	b.WriteString("\n")
+	for i, o := range offers {
+		// 价格做成可点的链接，收到通知就能直接跳去下单。
+		fmt.Fprintf(&b, "%d. <a href=\"%s\">%.2f 元</a> · %s\n",
+			i+1, telegram.Escape(o.URL), o.Price, telegram.Escape(o.Store()))
+		if t := o.SourceTitle; t != "" {
+			fmt.Fprintf(&b, "    <i>%s</i>\n", telegram.Escape(truncate(t, 50)))
+		}
+	}
+
+	fmt.Fprintf(&b, "\n%s", priceai.ProductPage)
 	return b.String()
 }
 
-func formatPrices(prices []float64) string {
-	parts := make([]string, 0, len(prices))
-	for _, p := range prices {
-		parts = append(parts, strconv.FormatFloat(p, 'f', 2, 64))
+// truncate 按字符（而非字节）截断，避免把中文切坏。
+func truncate(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
 	}
-	return strings.Join(parts, ", ")
+	return string(r[:max]) + "…"
 }
