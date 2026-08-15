@@ -1,0 +1,7 @@
+/chatgpt-plus-price-monitor
+/dist/
+*.exe
+
+# runtime state & debug dumps
+state.json
+*.dump.html
