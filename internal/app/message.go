@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"html"
 	"strings"
 
 	"github.com/pexcn/chatgpt-plus-price-monitor/internal/priceai"
@@ -35,16 +36,17 @@ func buildMessage(action state.Action, cfg *config, a priceai.Analysis, best pri
 		if i >= cfg.top {
 			break
 		}
-		fmt.Fprintf(&b, "%d. <b>%.2f</b> 元 · %s\n", i+1, o.Price, telegram.Escape(o.Store()))
+		store := telegram.Escape(o.Store())
+		if o.URL != "" {
+			fmt.Fprintf(&b, "%d. <a href=\"%s\"><b>%.2f</b> 元 · %s</a>\n", i+1, html.EscapeString(o.URL), o.Price, store)
+		} else {
+			fmt.Fprintf(&b, "%d. <b>%.2f</b> 元 · %s\n", i+1, o.Price, store)
+		}
 		if t := o.SourceTitle; t != "" {
 			fmt.Fprintf(&b, "<i>%s</i>\n", telegram.Escape(truncate(t, 50)))
 		}
-		if o.URL != "" {
-			fmt.Fprintf(&b, "%s\n", telegram.Escape(o.URL))
-		}
 		b.WriteString("\n")
 	}
-	fmt.Fprint(&b, priceai.ProductPage)
 	return b.String()
 }
 
