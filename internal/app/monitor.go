@@ -84,10 +84,10 @@ func reportFailure(ctx context.Context, notify notifier, cfg *config, prev state
 
 func send(ctx context.Context, notify notifier, msg, kind string) bool {
 	if err := notify.Send(ctx, msg); err != nil {
-		log.Printf("发送%s失败: %v", kind, err)
+		log.Printf("Telegram 通知发送失败 | 类型=%s | 错误=%v", kind, err)
 		return false
 	}
-	log.Printf("已发送 %s", kind)
+	log.Printf("Telegram 通知已发送 | 类型=%s", kind)
 	return true
 }
 
