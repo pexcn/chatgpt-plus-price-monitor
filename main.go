@@ -29,6 +29,7 @@ type config struct {
 	statePath     string
 	cooldown      time.Duration
 	notifyRecover bool
+	failThreshold int
 
 	token   string
 	chatID  string
@@ -95,6 +96,7 @@ func parseFlags() *config {
 	flag.StringVar(&cfg.statePath, "state", "state.json", "状态文件路径，用于通知去重")
 	flag.DurationVar(&cfg.cooldown, "cooldown", 24*time.Hour, "价格持续低于阈值时的重复提醒间隔；为 0 表示只在跌破时提醒一次")
 	flag.BoolVar(&cfg.notifyRecover, "notify-recover", true, "价格回升到阈值之上时也发一条通知")
+	flag.IntVar(&cfg.failThreshold, "fail-threshold", 3, "连续抓取失败 N 次后发告警（避免监控静默失效）；0 表示关闭")
 
 	flag.StringVar(&cfg.token, "telegram-token", os.Getenv("TELEGRAM_BOT_TOKEN"), "Telegram Bot Token（建议改用环境变量 TELEGRAM_BOT_TOKEN）")
 	flag.StringVar(&cfg.chatID, "telegram-chat", os.Getenv("TELEGRAM_CHAT_ID"), "Telegram Chat ID（可用环境变量 TELEGRAM_CHAT_ID）")
@@ -148,23 +150,14 @@ func (c *config) validate() error {
 type fetcher func(ctx context.Context, n int) ([]priceai.Offer, error)
 
 func checkOnce(ctx context.Context, fetch fetcher, httpc *http.Client, cfg *config) error {
-	offers, err := fetch(ctx, cfg.top)
-	if err != nil {
-		return err
-	}
-	st := priceai.Summarize(offers)
-	below := st.Avg <= cfg.threshold
+	offers, fetchErr := fetch(ctx, cfg.top)
 
-	log.Printf("最便宜的 %d 个均价 %.2f 元（最低 %.2f / 最高 %.2f），阈值 %.2f -> %s",
-		cfg.top, st.Avg, st.Min, st.Max, cfg.threshold,
-		map[bool]string{true: "已达成", false: "未达成"}[below])
-	if cfg.verbose {
-		for i, o := range offers {
-			log.Printf("  %d. %.2f 元 | %s | %s", i+1, o.Price, o.Store(), o.SourceTitle)
-		}
-	}
-
+	// dry-run 只看结果，不读写状态、不发通知。
 	if cfg.dryRun {
+		if fetchErr != nil {
+			return fetchErr
+		}
+		logResult(cfg, offers, priceai.Summarize(offers))
 		log.Print("dry-run：跳过通知")
 		return nil
 	}
@@ -173,20 +166,86 @@ func checkOnce(ctx context.Context, fetch fetcher, httpc *http.Client, cfg *conf
 	if err != nil {
 		return fmt.Errorf("读取状态文件失败: %w", err)
 	}
+	tg := &telegram.Client{Token: cfg.token, ChatID: cfg.chatID, HTTP: httpc, BaseURL: cfg.apiBase}
+
+	if fetchErr != nil {
+		return reportFailure(ctx, tg, cfg, prev, fetchErr)
+	}
+	return reportPrice(ctx, tg, cfg, prev, offers)
+}
+
+// reportFailure 处理抓取失败：累计次数，达到阈值时告警一次。
+//
+// 无论有没有发通知都原样返回抓取错误，让单次模式保持非 0 退出码。
+func reportFailure(ctx context.Context, tg *telegram.Client, cfg *config, prev state.State, cause error) error {
+	next := prev
+	next.Failures++
+
+	// 一轮故障只告警一次，恢复后才会重新武装。
+	if cfg.failThreshold > 0 && next.Failures >= cfg.failThreshold && !prev.FailNotified {
+		if err := tg.Send(ctx, buildFailureMessage(next.Failures, cause)); err != nil {
+			// 通知本身也失败了（比如整个网络都不通），保持未告警状态下轮重试。
+			log.Printf("发送失败告警时出错: %v", err)
+		} else {
+			next.FailNotified = true
+			log.Printf("已发送抓取失败告警（连续失败 %d 次）", next.Failures)
+		}
+	}
+
+	if err := state.Save(cfg.statePath, next); err != nil {
+		log.Printf("写状态文件失败: %v", err)
+	}
+	return cause
+}
+
+// reportPrice 处理抓取成功：先补一条恢复通知（如果之前告过警），再走价格判断。
+func reportPrice(ctx context.Context, tg *telegram.Client, cfg *config, prev state.State, offers []priceai.Offer) error {
+	st := priceai.Summarize(offers)
+	below := st.Avg <= cfg.threshold
+	logResult(cfg, offers, st)
+
+	next := prev
+	next.Below = below
+	next.Failures = 0
+	next.FailNotified = false
+
+	if prev.FailNotified {
+		if err := tg.Send(ctx, buildRecoveryMessage(prev.Failures)); err != nil {
+			log.Printf("发送恢复通知时出错: %v", err)
+		} else {
+			log.Print("已发送抓取恢复通知")
+		}
+	}
+
 	now := time.Now()
 	action := prev.Decide(below, now, cfg.cooldown, cfg.notifyRecover)
 	if action == state.Silent {
 		// 状态本身仍要更新，否则跌破后的第一条提醒会重复发。
-		return state.Save(cfg.statePath, state.State{Below: below, LastNotify: prev.LastNotify, LastAvg: prev.LastAvg})
+		return state.Save(cfg.statePath, next)
 	}
 
-	tg := &telegram.Client{Token: cfg.token, ChatID: cfg.chatID, HTTP: httpc, BaseURL: cfg.apiBase}
 	if err := tg.Send(ctx, buildMessage(action, cfg, offers, st, prev.LastAvg)); err != nil {
 		return err
 	}
 	log.Printf("已发送 Telegram 通知 (%s)", action)
 
-	return state.Save(cfg.statePath, state.State{Below: below, LastNotify: now, LastAvg: st.Avg})
+	next.LastNotify = now
+	next.LastAvg = st.Avg
+	return state.Save(cfg.statePath, next)
+}
+
+func logResult(cfg *config, offers []priceai.Offer, st priceai.Stats) {
+	reached := "未达成"
+	if st.Avg <= cfg.threshold {
+		reached = "已达成"
+	}
+	log.Printf("最便宜的 %d 个均价 %.2f 元（最低 %.2f / 最高 %.2f），阈值 %.2f -> %s",
+		cfg.top, st.Avg, st.Min, st.Max, cfg.threshold, reached)
+	if cfg.verbose {
+		for i, o := range offers {
+			log.Printf("  %d. %.2f 元 | %s | %s", i+1, o.Price, o.Store(), o.SourceTitle)
+		}
+	}
 }
 
 func buildMessage(action state.Action, cfg *config, offers []priceai.Offer, st priceai.Stats, prevAvg float64) string {
@@ -217,6 +276,22 @@ func buildMessage(action state.Action, cfg *config, offers []priceai.Offer, st p
 	}
 
 	fmt.Fprintf(&b, "\n%s", priceai.ProductPage)
+	return b.String()
+}
+
+func buildFailureMessage(failures int, cause error) string {
+	var b strings.Builder
+	b.WriteString("⚠️ <b>价格监控异常</b>\n\n")
+	fmt.Fprintf(&b, "已连续 %d 次抓取失败，监控可能已经失效。\n\n", failures)
+	fmt.Fprintf(&b, "最后一次错误：\n<code>%s</code>\n", telegram.Escape(cause.Error()))
+	fmt.Fprintf(&b, "\n接口可能改版了，需要人工确认：\n%s", priceai.ProductPage)
+	return b.String()
+}
+
+func buildRecoveryMessage(failures int) string {
+	var b strings.Builder
+	b.WriteString("✅ <b>价格监控已恢复</b>\n\n")
+	fmt.Fprintf(&b, "抓取重新正常（此前连续失败 %d 次），继续监控中。", failures)
 	return b.String()
 }
 

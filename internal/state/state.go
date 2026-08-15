@@ -20,6 +20,14 @@ type State struct {
 	LastNotify time.Time `json:"last_notify,omitempty"`
 	// LastAvg 是最近一次通知时的均价，用于价格回升时的对比文案。
 	LastAvg float64 `json:"last_avg,omitempty"`
+
+	// Failures 是连续抓取失败的次数，抓取成功时清零。
+	//
+	// 计数存在文件里而不是内存里，这样挂 cron 的单次模式（每轮都是新进程）
+	// 也能累计。
+	Failures int `json:"failures,omitempty"`
+	// FailNotified 表示本轮故障已经发过告警，避免每次失败都推一条。
+	FailNotified bool `json:"fail_notified,omitempty"`
 }
 
 // Load 读取状态文件。文件不存在时返回零值状态（等同于"从未告警过"）。
