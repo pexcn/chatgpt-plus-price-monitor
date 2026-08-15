@@ -84,6 +84,7 @@ func testConfig() *config {
 		threshold:     10,
 		interval:      30 * time.Minute,
 		sample:        30,
+		minPrice:      0,
 		floorRatio:    0.5,
 		top:           5,
 		cooldown:      24 * time.Hour,
@@ -202,7 +203,7 @@ func TestCheckSilentWhenAlwaysExpensive(t *testing.T) {
 	}
 }
 
-// 没有凭据时只记日志，但抓取错误仍要返回（--once 靠它拿非 0 退出码）。
+// 没有凭据时只记日志，但抓取错误仍要返回（--interval 0 靠它拿非 0 退出码）。
 func TestCheckWithoutNotifier(t *testing.T) {
 	cfg := testConfig()
 	if _, err := check(context.Background(), stubFetch(offersAt(1, 1, 1, 1, 1)), nil, cfg, state.State{}); err != nil {
@@ -392,13 +393,13 @@ func TestNewNotifier(t *testing.T) {
 
 // 短选项与长选项必须指向同一个变量。
 func TestShortFlags(t *testing.T) {
-	long, _ := parseFlags([]string{"--top", "8", "--threshold", "12.5", "--interval", "1h", "--sample", "50", "--verbose"})
-	short, _ := parseFlags([]string{"-n", "8", "-t", "12.5", "-i", "1h", "-s", "50", "-v"})
+	long, _ := parseFlags([]string{"--top", "8", "--threshold", "12.5", "--interval", "1h", "--sample", "50", "--min-price", "60", "--verbose"})
+	short, _ := parseFlags([]string{"-n", "8", "-t", "12.5", "-i", "1h", "-s", "50", "-m", "60", "-v"})
 
 	if *long != *short {
 		t.Errorf("短选项结果与长选项不一致:\n长 %+v\n短 %+v", *long, *short)
 	}
-	if short.top != 8 || short.threshold != 12.5 || short.interval != time.Hour || short.sample != 50 || !short.verbose {
+	if short.top != 8 || short.threshold != 12.5 || short.interval != time.Hour || short.sample != 50 || short.minPrice != 60 || !short.verbose {
 		t.Errorf("短选项解析结果不对: %+v", short)
 	}
 }
@@ -443,10 +444,18 @@ func TestValidate(t *testing.T) {
 	if err := testConfig().validate(); err != nil {
 		t.Errorf("合法配置不应报错: %v", err)
 	}
+	// --interval 0 表示只跑一次，是合法值。
+	once := testConfig()
+	once.interval = 0
+	if err := once.validate(); err != nil {
+		t.Errorf("--interval 0 应当合法: %v", err)
+	}
 	bad := map[string]func(*config){
 		"top 为 0":          func(c *config) { c.top = 0 },
 		"阈值为 0":            func(c *config) { c.threshold = 0 },
-		"interval 为 0":     func(c *config) { c.interval = 0 },
+		"interval 为负":      func(c *config) { c.interval = -1 },
+		"min-price 为负":     func(c *config) { c.minPrice = -1 },
+		"min-price 高于阈值":   func(c *config) { c.minPrice = 100 },
 		"sample 为 0":       func(c *config) { c.sample = 0 },
 		"floor-ratio 为 0":  func(c *config) { c.floorRatio = 0 },
 		"floor-ratio 超过 1": func(c *config) { c.floorRatio = 1.5 },
