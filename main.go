@@ -116,7 +116,7 @@ func newFlagSet(cfg *config, errorHandling flag.ErrorHandling) *flag.FlagSet {
 
 	fs.Float64Var(&cfg.threshold, "threshold", 10, "最便宜的可信报价低于该价格（元）时通知")
 	fs.DurationVar(&cfg.interval, "interval", 30*time.Minute, "轮询间隔，0 表示只检查一次就退出")
-	fs.Float64Var(&cfg.minPrice, "min-price", 0, "排除低于该价格（元）的报价，用于滤掉日抛等另一档商品，0 表示不限制")
+	fs.Float64Var(&cfg.minPrice, "min-price", 0, "排除低于该价格（元）的报价，用于过滤掉非 Plus 商品，0 表示不限制")
 	fs.IntVar(&cfg.sample, "sample", 30, "取多少条报价作为参考价位的样本")
 	fs.Float64Var(&cfg.floorRatio, "floor-ratio", 0.5, "低于 参考价位×该比例 的报价视为异常规格剔除")
 	fs.IntVar(&cfg.top, "top", 5, "通知里列出最便宜的 N 条")
