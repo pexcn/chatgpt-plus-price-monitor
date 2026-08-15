@@ -131,14 +131,6 @@ func newFlagSet(cfg *config, errorHandling flag.ErrorHandling) *flag.FlagSet {
 	fs.DurationVar(&cfg.timeout, "timeout", 30*time.Second, "单次 HTTP 请求超时")
 	fs.BoolVar(&cfg.verbose, "verbose", false, "打印每条报价的店铺和标题")
 
-	// 短选项和长选项共用同一个变量，这是 flag 包里做别名的常规写法。
-	fs.Float64Var(&cfg.threshold, "t", 10, "")
-	fs.Var(&intervalValue, "i", "")
-	fs.IntVar(&cfg.sample, "s", 30, "")
-	fs.Float64Var(&cfg.floorRatio, "f", 0, "")
-	fs.IntVar(&cfg.top, "n", 5, "")
-	fs.BoolVar(&cfg.verbose, "v", false, "")
-
 	fs.Usage = func() { usage(fs) }
 	return fs
 }
@@ -187,13 +179,55 @@ func (f *intervalFlag) Set(value string) error {
 func parseFlags(args []string) (*config, *flag.FlagSet) {
 	cfg := &config{}
 	fs := newFlagSet(cfg, flag.ExitOnError)
-	_ = fs.Parse(args)
+	_ = fs.Parse(translateShortArgs(args))
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "floor-ratio" || f.Name == "f" {
+		if f.Name == "floor-ratio" {
 			cfg.floorRatioSet = true
 		}
 	})
 	return cfg, fs
+}
+
+func translateShortArgs(in []string) []string {
+	mapping := make(map[string]string, len(options))
+	for _, option := range options {
+		if option.short != "" {
+			mapping[option.short] = option.long
+		}
+	}
+
+	out := make([]string, 0, len(in))
+	for i, arg := range in {
+		if arg == "--" {
+			return append(append(out, arg), in[i+1:]...)
+		}
+		if strings.HasPrefix(arg, "--") || !strings.HasPrefix(arg, "-") || len(arg) < 2 {
+			out = append(out, arg)
+			continue
+		}
+
+		rest := arg[1:]
+		if eq := strings.IndexByte(rest, '='); eq >= 0 {
+			if long, ok := mapping[rest[:eq]]; ok {
+				out = append(out, "--"+long+rest[eq:])
+			} else {
+				out = append(out, arg)
+			}
+			continue
+		}
+
+		long, ok := mapping[rest[:1]]
+		if !ok {
+			out = append(out, arg)
+			continue
+		}
+		if attached := rest[1:]; attached != "" {
+			out = append(out, "--"+long+"="+attached)
+		} else {
+			out = append(out, "--"+long)
+		}
+	}
+	return out
 }
 
 // newNotifier 从环境变量读 Telegram 凭据，没配全就返回 nil（只记日志）。

@@ -391,7 +391,7 @@ func TestNewNotifier(t *testing.T) {
 	}
 }
 
-// 短选项与长选项必须指向同一个变量。
+// 短选项翻译成长选项后，解析结果必须一致。
 func TestShortFlags(t *testing.T) {
 	long, _ := parseFlags([]string{"--top", "8", "--threshold", "12.5", "--interval", "1h", "--sample", "50", "--verbose"})
 	short, _ := parseFlags([]string{"-n", "8", "-t", "12.5", "-i", "1h", "-s", "50", "-v"})
@@ -401,6 +401,15 @@ func TestShortFlags(t *testing.T) {
 	}
 	if short.top != 8 || short.threshold != 12.5 || short.interval != time.Hour || short.sample != 50 || !short.verbose {
 		t.Errorf("短选项解析结果不对: %+v", short)
+	}
+}
+
+func TestTranslateShortArgs(t *testing.T) {
+	in := []string{"-n8", "-t=12.5", "-i3m:1m", "-v", "--", "-n", "9"}
+	want := []string{"--top=8", "--threshold=12.5", "--interval=3m:1m", "--verbose", "--", "-n", "9"}
+	got := translateShortArgs(in)
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("translateShortArgs() = %q，期望 %q", got, want)
 	}
 }
 
@@ -488,14 +497,11 @@ func TestPrintOptionsOrderAndCoverage(t *testing.T) {
 		pos = i
 	}
 
-	// 覆盖：每个注册过的选项要么在 options 里，要么是短选项别名。
+	// 覆盖：每个注册过的长选项都必须在 options 里。
 	// 少了这条，新加的选项会静默地从帮助里消失。
 	known := map[string]bool{}
 	for _, o := range options {
 		known[o.long] = true
-		if o.short != "" {
-			known[o.short] = true
-		}
 	}
 	fs.VisitAll(func(f *flag.Flag) {
 		if !known[f.Name] {
